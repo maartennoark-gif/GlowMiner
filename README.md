@@ -15,6 +15,7 @@ Features:
 - Direkt-Exchange: Ziel BTC/USDT/LTC/ETH, Anteil-Slider 0–100% (100% = direkt auf Exchange-Deposit, dazwischen Zeit-Split pro 60 Min), Buttons für Exchange-Seite + Pool-Dashboard
 - Multi-Miner: BzMiner, TeamRedMiner, SRBMiner-Multi, WildRig-Multi, OneZeroMiner — werden beim ersten Start automatisch von GitHub geladen
 - **⚡ Besten testen**: testet alle kompatiblen Miner auf dem gewählten Coin (Standard 60 s, einstellbar) und wählt automatisch den mit der höchsten Hashrate
+- **Coin-Suche + Estimates**: sucht Coins, zeigt ca. Coins/Tag und $/Tag (7900-XTX-Hashrate × Leistungs-Regler, WhatToMine live), Tages-Volumen, Börse (MEXC/NonKYC/…) und Hinweis (minebar / dünn). Doppelklick auf XNA/DNX/CLORE übernimmt ihn als Mining-Coin
 
 ## Start (Code)
 

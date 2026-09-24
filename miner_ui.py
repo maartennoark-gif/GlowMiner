@@ -112,6 +112,39 @@ COINS = {
     },
 }
 
+# ---------- Coin-Suche: Schätzwerte (7900 XTX Hashrates, WhatToMine live) ----------
+# Hashrates in H/s bei 100% Leistung (7900 XTX Defaults, skaliert mit Leistungs-Regler)
+EST_HASHRATE = {
+    "KawPow": 58e6,
+    "DynexSolve": 2500.0,
+    "Xelishashv3": 10500.0,
+    "FishHash": 67e6,
+    "Autolykos": 190e6,
+    "Octopus": 111e6,
+    "Etchash": 100e6,
+    "Karlsenhashv2": 67e6,
+    "NexaPow": 93e6,
+}
+# Tags die wir im Estimate-Board zeigen (minebar + gängige Alternativen)
+EST_TAGS = ["XNA", "DNX", "RVN", "XEL", "ERG", "CFX", "IRON", "KLS", "EPIC", "XTM", "ZANO"]
+# Kuratierte Börsen-Infos (WTM liefert nur Volumen, keine Venue-Namen)
+EXCHANGES = {
+    "XNA": ("MEXC (XNA/USDT)", "ok"),
+    "CLORE": ("MEXC / Gate (CLORE/USDT)", "ok"),
+    "DNX": ("NonKYC (DNX/USDT)", "dünn"),
+    "RVN": ("Binance / MEXC u.a.", "ok"),
+    "XEL": ("CoinEx / NonKYC — vorab prüfen", "dünn"),
+    "ERG": ("KuCoin / Gate u.a.", "ok"),
+    "CFX": ("Binance u.a.", "ok"),
+    "IRON": ("MEXC / Gate", "mittel"),
+    "KLS": ("kaum gelistet", "kaum verkaufbar"),
+    "PYI": ("kaum gelistet", "kaum verkaufbar"),
+    "EPIC": ("NonKYC", "dünn"),
+    "XTM": ("CoinEx / Gate", "mittel"),
+    "ZANO": ("CoinEx / MEXC", "ok"),
+}
+MINEABLE_TAGS = {"XNA", "DNX", "CLORE"}
+
 # ---------- Theme ----------
 BG = "#000000"
 PANEL = "#0a0a0a"
@@ -220,8 +253,8 @@ class MinerUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("7900 XTX Miner")
-        self.geometry("700x880")
-        self.minsize(640, 700)
+        self.geometry("700x1000")
+        self.minsize(640, 760)
         self.configure(bg=BG)
 
         self.cfg = load_config()
@@ -398,6 +431,44 @@ class MinerUI(tk.Tk):
         glow_button(ex_btns, "⇄ Exchange-Seite öffnen", self.open_exchange).pack(side="left", padx=(0, 6))
         glow_button(ex_btns, "Pool-Dashboard", self.open_pool_dashboard).pack(side="left")
 
+        # Coin-Suche + Estimates (WhatToMine live, 7900-XTX-Hashrates × Leistung)
+        glow_label(root, "COIN-SUCHE  (Ertrag / Exchange / Volumen)", size=9, bold=True, dim=True).pack(anchor="w", pady=(10, 0))
+        srow2 = tk.Frame(root, bg=BG)
+        srow2.pack(fill="x", pady=2)
+        self.search_var = tk.StringVar()
+        self.search_entry = dark_entry(srow2, self.search_var)
+        self.search_entry.pack(side="left", fill="x", expand=True)
+        self.search_entry.bind("<KeyRelease>", lambda _: self._on_search())
+        glow_button(srow2, "↻ Aktualisieren", self.refresh_estimates).pack(side="left", padx=(6, 0))
+        self.est_status_var = tk.StringVar(value="Noch keine Daten – „Aktualisieren“ drücken.")
+        tk.Label(root, textvariable=self.est_status_var, bg=BG, fg=DIM,
+                 font=("Segoe UI", 8)).pack(anchor="w")
+        from tkinter import ttk as _ttk
+        _style = _ttk.Style(self)
+        try:
+            _style.theme_use("clam")
+        except Exception:
+            pass
+        _style.configure("Est.Treeview", background="#050505", foreground="#f0f0f0",
+                         fieldbackground="#050505", rowheight=20, font=("Consolas", 8))
+        _style.configure("Est.Treeview.Heading", background="#111111", foreground="#ffffff",
+                         font=("Segoe UI", 8, "bold"))
+        _style.map("Est.Treeview", background=[("selected", "#333333")],
+                   foreground=[("selected", "#ffffff")])
+        cols = ("coin", "algo", "perday", "usd", "vol", "exchange", "note")
+        self.est_tree = _ttk.Treeview(root, columns=cols, show="headings", height=7, style="Est.Treeview")
+        widths = {"coin": 90, "algo": 90, "perday": 100, "usd": 80, "vol": 90, "exchange": 150, "note": 130}
+        heads = {"coin": "Coin", "algo": "Algo", "perday": "Coins/Tag*", "usd": "$/Tag*",
+                 "vol": "Vol/Tag", "exchange": "Exchange", "note": "Hinweis"}
+        for c in cols:
+            self.est_tree.heading(c, text=heads[c])
+            self.est_tree.column(c, width=widths[c], anchor="w")
+        self.est_tree.pack(fill="x", pady=4)
+        self.est_tree.bind("<Double-1>", self._on_est_select)
+        tk.Label(root, text="*ca.-Schätzung: 7900-XTX-Hashrate × Leistungs-Regler. Doppelklick auf XNA/DNX übernimmt ihn als Mining-Coin.",
+                 bg=BG, fg=DIM, font=("Segoe UI", 8), wraplength=640, justify="left").pack(anchor="w")
+        self.est_data = []  # Liste von Dicts der letzten Schätzung
+
         # Buttons
         crow = tk.Frame(root, bg=BG)
         crow.pack(fill="x", pady=12)
@@ -488,6 +559,20 @@ class MinerUI(tk.Tk):
             self.power_label_var.set(f"{pct}%  →  auto (max)")
         else:
             self.power_label_var.set(f"{pct}%  →  -i {intensity}")
+        # Estimates auf neue Leistung umskalieren
+        try:
+            old = getattr(self, "est_scale", None)
+            if old and self.est_data and old != pct / 100.0:
+                f = (pct / 100.0) / old
+                for r in self.est_data:
+                    if r["perday"] is not None:
+                        r["perday"] *= f
+                    if r["usd"] is not None:
+                        r["usd"] *= f
+                self.est_scale = pct / 100.0
+                self._render_estimates()
+        except Exception:
+            pass
         self.refresh_cmd()
 
     @staticmethod
@@ -655,6 +740,149 @@ class MinerUI(tk.Tk):
         except Exception:
             pass
         self.log_q.put(f"» Pool-Dashboard: {url}\n» Dort Wallet suchen + ggf. Auto-Exchange zu BTC/USDT aktivieren.\n")
+
+    # ---------- Coin-Suche / Estimates ----------
+    def refresh_estimates(self):
+        self.est_status_var.set("Lade WhatToMine-Daten …")
+        threading.Thread(target=self._estimates_thread, daemon=True).start()
+
+    def _btc_usd(self):
+        try:
+            req = urllib.request.Request(
+                "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
+                headers={"User-Agent": "xtx-miner"})
+            import ssl
+            ctx = ssl.create_default_context()
+            with urllib.request.urlopen(req, context=ctx, timeout=15) as r:
+                return float(json.loads(r.read().decode())["bitcoin"]["usd"])
+        except Exception:
+            return 84000.0
+
+    def _estimates_thread(self):
+        import ssl
+        try:
+            pct = int(self.power_var.get())
+        except Exception:
+            pct = 100
+        scale = pct / 100.0
+        try:
+            ctx = ssl.create_default_context()
+            req = urllib.request.Request("https://whattomine.com/coins.json",
+                                         headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
+                coins = json.loads(r.read().decode()).get("coins", {})
+        except Exception as e:
+            self.log_q.put(f"» Estimates: WhatToMine nicht erreichbar ({e}) – Offline-Kurztabelle.\n")
+            self._estimates_fallback(scale)
+            return
+        btc = self._btc_usd()
+        rows = []
+        for name, c in coins.items():
+            tag = str(c.get("tag", ""))
+            if tag not in EST_TAGS:
+                continue
+            algo = str(c.get("algorithm", ""))
+            base_hs = EST_HASHRATE.get(algo)
+            if not base_hs:
+                continue
+            try:
+                nethash = float(c.get("nethash") or 0)
+                btime = float(c.get("block_time") or 0)
+                reward = float(c.get("block_reward") or 0)
+                rate_btc = float(c.get("exchange_rate") or 0)
+                vol_btc = float(c.get("exchange_rate_vol") or 0)
+            except Exception:
+                continue
+            if nethash <= 0 or btime <= 0:
+                continue
+            user_hs = base_hs * scale
+            perday = user_hs / nethash * (86400.0 / btime) * reward
+            usd = perday * rate_btc * btc
+            vol = vol_btc * btc
+            venue, liq = EXCHANGES.get(tag, ("–", ""))
+            note = "★ minebar" if tag in MINEABLE_TAGS else ""
+            if vol < 15000:
+                note = (note + " dünn!").strip()
+            rows.append({"coin": f"{tag} ({name[:18]})", "tag": tag, "algo": algo,
+                         "perday": perday, "usd": usd, "vol": vol,
+                         "exchange": venue, "note": note or "nur Schätzung"})
+        # CLORE ist nicht auf WTM → kuratierte Info-Zeile
+        rows.append({"coin": "CLORE (Clore.ai)", "tag": "CLORE", "algo": "KawPow",
+                     "perday": None, "usd": None, "vol": None,
+                     "exchange": EXCHANGES["CLORE"][0], "note": "★ minebar, nicht auf WTM"})
+        rows.sort(key=lambda r: (r["usd"] is None, -(r["usd"] or 0)))
+        self.est_data = rows
+        self.est_scale = scale
+        self.est_status_var.set(f"WhatToMine live • BTC ${btc:,.0f} • Leistung {pct}% berücksichtigt")
+        self._render_estimates()
+        self.log_q.put(f"» Estimates aktualisiert ({len(rows)} Coins, BTC ${btc:,.0f}).\n")
+
+    def _estimates_fallback(self, scale):
+        # Offline: grobe, als solche markierte Werte
+        fb = [
+            {"coin": "XNA (Neurai)", "tag": "XNA", "algo": "KawPow",
+             "perday": 5400 * scale, "usd": 0.25 * scale, "vol": 30000.0,
+             "exchange": EXCHANGES["XNA"][0], "note": "★ minebar (offline)"},
+            {"coin": "DNX (Dynexcoin)", "tag": "DNX", "algo": "DynexSolve",
+             "perday": 4.0 * scale, "usd": 0.01 * scale, "vol": 3000.0,
+             "exchange": EXCHANGES["DNX"][0], "note": "★ minebar, dünn! (offline)"},
+            {"coin": "CLORE (Clore.ai)", "tag": "CLORE", "algo": "KawPow",
+             "perday": None, "usd": None, "vol": None,
+             "exchange": EXCHANGES["CLORE"][0], "note": "★ minebar (offline)"},
+        ]
+        self.est_data = fb
+        self.est_scale = scale
+        self.est_status_var.set("Offline-Schätzung (WhatToMine nicht erreichbar).")
+        self._render_estimates()
+
+    def _render_estimates(self):
+        try:
+            q = self.search_var.get().strip().lower()
+        except Exception:
+            q = ""
+        try:
+            for i in self.est_tree.get_children():
+                self.est_tree.delete(i)
+        except Exception:
+            return
+        for r in self.est_data:
+            hay = (r["coin"] + " " + r["algo"] + " " + r["tag"]).lower()
+            if q and q not in hay:
+                continue
+            pd = f"{r['perday']:,.0f}" if r["perday"] is not None else "–"
+            us = f"${r['usd']:,.2f}" if r["usd"] is not None else "–"
+            vo = f"${r['vol']:,.0f}" if r["vol"] is not None else "–"
+            self.est_tree.insert("", "end", values=(r["coin"], r["algo"], pd, us, vo, r["exchange"], r["note"]))
+
+    def _on_search(self):
+        self._render_estimates()
+
+    def _on_est_select(self, _evt=None):
+        try:
+            sel = self.est_tree.selection()
+            if not sel:
+                return
+            vals = self.est_tree.item(sel[0], "values")
+        except Exception:
+            return
+        if not vals:
+            return
+        # Tag aus erster Spalte holen ("XNA (Neurai)" → XNA)
+        tag = vals[0].split()[0]
+        if tag == "XNA":
+            self.coin_var.set([k for k in COINS if "XNA" in k][0])
+            self.on_coin_change()
+            self.log_q.put("» XNA aus Suche als Mining-Coin übernommen.\n")
+        elif tag == "DNX":
+            self.coin_var.set([k for k in COINS if "DNX" in k][0])
+            self.on_coin_change()
+            self.log_q.put("» DNX aus Suche als Mining-Coin übernommen.\n")
+        elif tag == "CLORE":
+            self.coin_var.set([k for k in COINS if "CLORE" in k][0])
+            self.on_coin_change()
+            self.log_q.put("» CLORE als Mining-Coin übernommen.\n")
+        else:
+            self.log_q.put(f"» {tag}: nur Schätzung – minebar sind XNA / CLORE / DNX.\n")
 
     def browse_bz(self):
         p = filedialog.askopenfilename(title="miner .exe wählen",
