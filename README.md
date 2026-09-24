@@ -2,6 +2,17 @@
 
 Windows-Tool für AMD RX 7900 XTX **und** NVIDIA-GPUs: Wallet eintragen, AI-Coin wählen, Leistung per Regler begrenzen, minen. Kein Overclocking / Undervolting — nur Miner-Intensity.
 
+## Zwei Varianten
+
+- **`miner_ui.py` / `XTX-Miner.exe`** (Python/Tkinter): kompakte Single-EXE, gleiche Features.
+- **`glowminer-app/` (React + Electron, empfohlen)**: Tabs für Mining, **Alle-Coins-Browser**, **Wallets** (Adressbuch + WalletConnect für EVM-Wallet-Apps) und Log. Baut eine portable EXE:
+  ```bat
+  cd glowminer-app
+  npm install
+  npm run dist
+  ```
+  Fertig: `glowminer-app/release/GlowMiner-<version>-portable.exe`.
+
 Coins:
 - **Neurai (XNA)** — AI-IoT, auf MEXC verkaufbar
 - **Clore (CLORE)** — AI-Compute, liquide

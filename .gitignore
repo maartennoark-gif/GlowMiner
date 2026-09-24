@@ -1,7 +1,10 @@
 # Binaries / Build / Secrets — nicht ins Repo
 XTX-Miner.exe
+GlowMiner-*-portable.exe
 dist/
 build/
+release/
+node_modules/
 __pycache__/
 *.spec
 config.json
