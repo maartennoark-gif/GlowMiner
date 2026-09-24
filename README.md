@@ -1,6 +1,6 @@
-# XTX-Miner — 7900 XTX Mini-Miner (Black Glowing White UI)
+# GlowMiner — Mini-Miner mit Black-Glowing-White UI (AMD + NVIDIA)
 
-Windows-Tool für AMD RX 7900 XTX: Wallet eintragen, AI-Coin wählen, Leistung per Regler begrenzen, minen. Kein Overclocking / Undervolting — nur Miner-Intensity.
+Windows-Tool für AMD RX 7900 XTX **und** NVIDIA-GPUs: Wallet eintragen, AI-Coin wählen, Leistung per Regler begrenzen, minen. Kein Overclocking / Undervolting — nur Miner-Intensity.
 
 Coins:
 - **Neurai (XNA)** — AI-IoT, auf MEXC verkaufbar
