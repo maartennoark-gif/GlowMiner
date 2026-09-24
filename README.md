@@ -13,10 +13,11 @@ Windows-Tool für AMD RX 7900 XTX **und** NVIDIA-GPUs: Wallet eintragen, AI-Coin
   ```
   Fertig: `glowminer-app/release/GlowMiner-<version>-portable.exe`.
 
-Coins:
+Coins (Tauri-App v3.1+, ein Wallet-Feld für den aktiven Coin):
 - **Neurai (XNA)** — AI-IoT, auf MEXC verkaufbar
 - **Clore (CLORE)** — AI-Compute, liquide
 - **Dynex (DNX)** — AI-PoUW, ultra-leicht (Lotto, nur NonKYC)
+- **Xelis (XEL)** — Privacy-BlockDAG (XelisHashV3), MEXC + CoinEx (Miner: OneZeroMiner/SRBMiner/BzMiner)
 
 Features:
 - schwarzes UI mit weißem Glow (eine EXE)

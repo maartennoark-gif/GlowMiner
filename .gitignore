@@ -5,6 +5,7 @@ GlowMiner-portable.exe
 dist/
 build/
 release/
+target/
 node_modules/
 __pycache__/
 *.spec
