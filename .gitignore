@@ -1,6 +1,7 @@
 # Binaries / Build / Secrets — nicht ins Repo
 XTX-Miner.exe
 GlowMiner-*-portable.exe
+GlowMiner-portable.exe
 dist/
 build/
 release/
