@@ -1,0 +1,13 @@
+# Binaries / Build / Secrets — nicht ins Repo
+XTX-Miner.exe
+dist/
+build/
+__pycache__/
+*.spec
+config.json
+*.zip
+bzminer/
+teamredminer/
+srbminer/
+wildrig/
+onezerominer/
