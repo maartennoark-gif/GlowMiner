@@ -1,5 +1,6 @@
 // GlowMiner backend (Rust): Miner-Registry, Spawning, Benchmark, Downloads,
 // Exchange-Rotation, Config. Kein OC/UV — nur Intensity-Parameter.
+#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -299,7 +300,8 @@ fn build_cmd(app: &AppHandle, key: &str, algo: &str, wallet: &str, pool: &str, w
             let mut a = if algo == "dynex" {
                 vec!["-a".into(), "dynex".into(), "-p".into(), pool.into(),
                      "-w".into(), wallet.into(), "--pool_password".into(),
-                     worker.into(), "--nc".into(), "1".into()]
+                     worker.into(), "--nc".into(), "1".into(),
+                     "--dynex_pow_ratio".into(), "1.0".into()]
             } else {
                 vec!["-a".into(), malgo.into(), "-w".into(),
                      format!("{wallet}.{worker}"), "-p".into(), pool.into()]

@@ -19,11 +19,16 @@ export const COINS = [
     id: 'dynex', name: 'Dynex', symbol: 'DNX', tag: 'DNX', woolyTag: null,
     desc: 'AI-PoUW neuromorphic (DynexSolve)',
     pools: [
-      'stratum+tcp://fr-dynex.miningocean.org:3332',
       'stratum+tcp://dnx.neuropool.net:2222',
+      'stratum+tcp://fr-dynex.miningocean.org:3332',
       'stratum+tcp://us-east.dnx.minenow.space:18443',
     ],
-    soloPools: [],
+    // Solo-Endpunkte aus BzMiner-Doku (kein solo:-Prefix nötig)
+    soloPools: [
+      'stratum+tcp://us-east.dnx.minenow.space:18000',
+      'stratum+tcp://us.dynex.herominers.com:1120',
+      'stratum+tcp://pool.us.deepminerz.com:3333',
+    ],
     exchangeUrl: 'https://nonkyc.io/market/DNX_USDT',
   },
   {
