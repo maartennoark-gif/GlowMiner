@@ -111,6 +111,22 @@ export function estimateAll(wtmCoins, hashrateMap, scale, btcUsd) {
   return rows;
 }
 
+// Offline-Richtwerte (100% Leistung), falls kein Live-Abruf möglich ist.
+// Gemessen Sep 2026, als grobe Orientierung markiert.
+export const EST_FALLBACK = [
+  { key: 'XNA|Neurai', tag: 'XNA', name: 'Neurai', algo: 'KawPow',
+    perday: 5400, usd: 0.25, vol: 16586, marketCap: '-', exchange: 'MEXC (XNA/USDT)', mineable: true },
+  { key: 'RVN|Ravencoin', tag: 'RVN', name: 'Ravencoin', algo: 'KawPow',
+    perday: 169, usd: 0.40, vol: 793823, marketCap: '-', exchange: 'Binance / MEXC u.a.', mineable: false },
+  { key: 'XEL|Xelis', tag: 'XEL', name: 'Xelis', algo: 'Xelishashv3',
+    perday: 1.25, usd: 0.31, vol: 25284, marketCap: '-', exchange: 'MEXC / CoinEx', mineable: true },
+  { key: 'DNX|Dynexcoin', tag: 'DNX', name: 'Dynexcoin', algo: 'DynexSolve',
+    perday: 5, usd: 0.005, vol: 29345, marketCap: '-', exchange: 'NonKYC (DNX/USDT)', mineable: true },
+  { key: 'CLORE|Clore.ai', tag: 'CLORE', name: 'Clore.ai', algo: 'KawPow',
+    perday: null, usd: null, vol: null, marketCap: '-',
+    exchange: 'MEXC / Gate (CLORE/USDT)', mineable: true, infoOnly: true },
+];
+
 export function fmt(n, digits = 0) {
   if (n == null || Number.isNaN(n)) return '–';
   return n.toLocaleString('de-DE', { maximumFractionDigits: digits, minimumFractionDigits: digits });

@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import {
-  COINS, DEFAULT_HASHRATE, fmt,
+  COINS, DEFAULT_HASHRATE, EST_FALLBACK, fmt,
 } from './lib.js';
 
 const inTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -150,8 +150,11 @@ export default function App() {
       setCoinsMeta(`WhatToMine live - BTC $${Math.round(res.btc).toLocaleString('de-DE')} (${res.btc_src}) - Leistung ${cfg.powerPct}% - ${(res.rows || []).length} Coins`);
       pushLog(`[estimates] ${(res.rows || []).length} Coins (BTC via ${res.btc_src}).`);
     } catch (e) {
-      setCoinsMeta('Fehler: ' + e);
-      pushLog('[estimates] Fehler: ' + e);
+      // Fallback: Offline-Richtwerte, damit die Tabelle nie leer bleibt
+      estScale.current = 1;
+      setRows(EST_FALLBACK.map((r) => ({ ...r, offline: true })));
+      setCoinsMeta('Live-Abruf fehlgeschlagen (' + e + ') - Offline-Richtwerte.');
+      pushLog('[estimates] FEHLER: ' + e + ' - zeige Offline-Richtwerte.');
     }
     setCoinsLoading(false);
   }
@@ -236,6 +239,14 @@ export default function App() {
     rescaleRows(cfg.powerPct);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cfg.powerPct]);
+  const coinsTried = useRef(false);
+  useEffect(() => {
+    if (tab === 'coins' && !coinsTried.current) {
+      coinsTried.current = true;
+      loadCoins();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
 
   function setMode(m) {
     const c = COINS.find((x) => x.id === cfg.coin);
