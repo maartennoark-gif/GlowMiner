@@ -1,0 +1,729 @@
+bzminer environment variables
+=============================
+
+Mining functionality belongs in CLI/config.txt settings. This file records the
+remaining experimental environment controls pending migration. New controls
+should use the typed settings tree. See cli-help.txt and config.example.txt.
+
+MIGRATED CONTROLS (the miner no longer reads these environment names)
+----------------------------------------------------------
+BZ_OPENCL_ALLOW_LEGACY_AMD: removed; legacy AMD GPUs are enabled by default.
+Known incompatible program formats are skipped before driver compilation.
+BZ_CPU_THREADS: use --cpu-threads / cpu_threads.
+BZ_NO_CPU/CUDA/OPENCL/METAL: use --backends.<name> false.
+BZ_OPENCL_INCLUDE_NVIDIA: use --backends.opencl-include-owned-devices true.
+BZ_DISABLE_FEATURES: use --disable-avx2, --disable-avx512, --disable-sse,
+  --disable-vaes, --disable-amx (or their underscore config keys).
+BZ_DISABLE_HUGE_PAGES: use --disable_huge_pages.
+BZ_DISABLE_1GB_HUGE_PAGES: use --disable-1gb-huge-pages true.
+BZ_NO_SUPERIO: use --superio-fans false.
+BZ_POOL_PROBE_S: use --network.primary-probe-s <seconds>.
+BZ_QUANTUS_*: use --quantus.cuda-batch, --quantus.cuda-block,
+  --quantus.cuda-affine, --quantus.opencl-affine, --quantus.double-buffer,
+  --quantus.auth-token-file, --quantus.auth-token, --quantus.tls-pin-file,
+  --quantus.tls-pin. The config.txt quantus object uses underscore keys.
+  Null batch/block/affine values select device defaults; explicit zero is distinct.
+  File options retain precedence over direct token/pin values.
+
+TUNING
+------
+
+--cpu-threads <n> (CLI; cpu_threads in config.txt)
+    Cap the CPU mining worker count. Defaults to every logical processor the machine
+    has - on Windows that means ALL processor groups, not just the 64 of the group the
+    process started in.
+
+    More workers is not automatically faster, and each carries its own scratch memory.
+    Measured here on a 96-core / 192-thread box, accepted shares at matched uptime:
+
+        algo      64 thr   96 thr   192 thr
+        xelis        976     1478      2798    +187%   scales ~linearly
+        sha256d      338        -       873    +158%
+        pearl     100968   101407    111985     +11%   memory-bound; 96 == 64
+
+    So the useful range is workload-dependent. Lower it to leave the machine
+    responsive, or if memory is tight.
+
+BZ_ZK_THREADS=<n>
+    Same, for the Pearl ZK prover's internal parallelism. Taking every logical
+    processor is not always fastest once something else in the process wants CPU.
+
+BZ_XELIS_THREADS=<n>
+    Total resident GPU thread budget for xelis. Native staged CUDA profiles use
+    measured per-architecture budgets (192 hashes/SM on Ampere and Blackwell,
+    96 on Ada); the 10-GiB GA100 mining profile uses 320 hashes/SM. The budget is
+    divided across active work slots rather than multiplied by them.
+
+BZ_XELIS_BLOCK=32 | 64 | 128 | 256
+    Override the CUDA launch block for Xelis tuning. Native staged kernels use
+    32 by default; a recognized GA100 mining card uses 256.
+
+BZ_XELIS_STREAMS=1..8
+    Override the CUDA work-slot count for Xelis tuning. Defaults are three on
+    Ampere staged kernels, four on Ada/Blackwell staged kernels, two on a
+    recognized GA100 mining card, and one on legacy kernels.
+
+BZ_PEARL_OPENCL_NATIVE_WGS=<n>
+    Native OpenCL WMMA search workgroups per synchronized launch (Linux gfx1100:
+    65536; other profiles retain their tile-based cap). Diagnostic only: supported
+    AMD devices select the native OpenCL path and operand layout automatically.
+    The packed Pearl 1.3 path requires K=2048, rank=128 and the built-in 8x16 tile;
+    other legal shapes use the existing OpenCL implementation.
+
+BZ_PEARL_OPENCL_NATIVE_MAX_ATTEMPTS=<n>
+    Bound the native OpenCL search loop for diagnostic fixtures. Default unlimited.
+
+BZ_PEARL_DISABLE=<list>
+    Comma-separated CPU SIMD tiers to switch off for Pearl: avx512, avx2, sse, vaes,
+    amx. For A/B testing a kernel path against the portable one.
+
+BZ_PEARL_FP8_M=<rows> / BZ_PEARL_FP8_N=<columns> / BZ_PEARL_FP8_K=<common dimension>
+    Experimental certificate-v4 profiles: sm86 CUDA (RTX 3090) defaults to
+    8192 / 32768 / 2048; gfx1201 OpenCL (RX 9070 XT) uses the same dimensions.
+    Other CUDA/RDNA targets and Intel start at 1024 / 4096 / 2048.
+    See docs/pearl-fp8-architectures.md for build versus hardware coverage.
+    M is a multiple of 16, N of 32; K is 2048..65536,
+    divisible by 32. Separate from legacy BZ_PEARL_WORKLOAD_* settings.
+    See docs/pearl-fp8.md, docs/pearl-fp8-amd.md and docs/pearl-fp8-intel.md.
+
+FAULT INJECTION - for testing the stall and hang guards, never for mining
+----------------------------------------------------------
+Each of these reproduces on demand a fault that otherwise takes hours or days to
+observe, so the recovery built for it can be watched working rather than assumed.
+scripts/test-stall-verify.ps1 drives all of them and asserts on the log.
+
+BZ_PEARL_TEST_HANG_AFTER_S=<n>
+    Stop returning from the Pearl CUDA search n seconds after the first pass: a
+    device thread that is alive, holds its slot, and will never finish. It cannot
+    be interrupted, so it cannot be joined, so nothing inside the process can
+    clear it - which is what stall_guard.worker_hang_s / worker_kill_s exist for.
+    Expect: a restart attempt, then WORKER HUNG, then the watchdog killing and
+    restarting the worker.
+
+BZ_PEARL_TEST_HASH_BASE=<n>
+    Start the Pearl CUDA hash counter at n instead of zero. Pearl credits one
+    hash per INT8 MAC, so the counter ticks at the hashrate and a uint64 rolls
+    over 2^64 in 2.13 days at 100 TH/s; setting this just under 2^64 brings that
+    rollover forward to seconds. Expect the displayed rate not to move at all -
+    the total is only ever read as a DIFFERENCE against an earlier value of
+    itself, which unsigned arithmetic gets right across the wrap.
+
+BZ_NET_TEST_DNS_HANG=1
+    Make every name lookup accept the query and never answer. getaddrinfo() has
+    no timeout and no cancellation on any platform bzminer ships to, and it runs
+    on the pump thread inside reconnect. Expect "no configured pools reachable -
+    retrying", not a wedged miner.
+
+BZ_CN_THREADS=<n>
+    CryptoNight hashes in flight per GPU batch. Every hash in flight owns a
+    scratchpad (2 MiB for most variants, 4 MiB for cn-heavy), so the default is
+    what free VRAM holds, capped at 8192. Measured on an RTX 6000 Ada with cn/2:
+    2048 in flight 1.10 kH/s, 4096 1.38, 8192 1.65, 16384 1.65 - the loop is bound
+    by DRAM row activations and saturates at 8192; more only makes a batch longer.
+    Lower it to leave VRAM for something else; raise it on a card with more SMs
+    if it measures faster.
+
+
+BZ_C29_REFERENCE=0 | 1
+    C29 selects an automatic NVIDIA RTX 3090 profile when no manual C29 tuning
+    variable is present. Selection requires a recognized non-Ti RTX 3090 name,
+    CUDA capability 8.6, 82 SMs and 23 to less than 25 GiB total VRAM. Other
+    supported NVIDIA/CUDA devices keep the reference settings. C29 does not yet
+    provide AMD, Intel or CPU mining. This changes kernels/settings, not OC.
+
+    Set 1 to opt out. Unset or 0 permits automatic selection; other values are
+    rejected. Any recognized manual BZ_C29_* tuning variable, even empty or 0,
+    disables automatic selection and starts from the original reference defaults
+    before applying the existing manual parsers. REFERENCE=0 does not override
+    that rule. Unknown variable names do not select or disable a profile.
+
+    The first graph logs "C29 profile=rtx3090" or "C29 profile=reference" with
+    all 47 effective state settings, including cycle-tail overlap and any
+    synchronous-stream fallback.
+    The environment-only PREFER_SHARED override is not part of that marker.
+    C29 remains experimental; see plugins/internal/c29/VALIDATION.md for the
+    current device-specific correctness and performance evidence.
+
+BZ_C29_VRAM_LIMIT_MIB=0..1048576
+    CUDA memory-cap simulation. 6144 models a 6 GiB usable total while retaining
+    current CUDA context/module usage and allocation headroom. It never raises
+    real available memory. Unset or 0 removes the cap; malformed values fail.
+    Presence disables automatic profile selection and tuning; remove the
+    variable to restore automatic selection. This models capacity, not compute,
+    bandwidth or driver behavior of another GPU. A sufficiently small budget
+    selects the compact two-pass lean seed when measured free memory permits,
+    otherwise the three-pass fallback, or fails if neither fits. OpenCL does
+    not use this control.
+
+BZ_C29_LEAN=0 | 1 | 2 | 3
+    CUDA global-route seed selection. 0 permits automatic capacity selection;
+    1 forces the existing two-pass, one-round pruning prefix; 2 forces a new
+    three-pass, two-round prefix with two 2 GiB graph banks. Mode 3 forces a
+    compact two-pass prefix with 5376 MiB graph banks and adaptive 16/32/64 MiB
+    scratch. It requires at least 5824 MiB currently free, including 256 MiB
+    allocation headroom; context/display usage remains charged. For a forced mode
+    also set BZ_C29_SEED_MODE=8. Unsupported route combinations fail closed.
+    Mode 2 regenerates edges three times to trade speed for lower memory use.
+    Complete degree bitmaps preserve parallel edges and exact pruning; bucket
+    overflow invalidates the graph. No proof, fee or pool behavior changes.
+
+BZ_C29_COARSE_ROUNDS=0..64
+    Manual C29 trim-cutoff experiment: select how many initial rounds use the
+    coarse trim/rebucket path before switching to fine trimming. The reference
+    and automatic RTX 3090 profiles use 16. Values 17 through 64 are exposed for
+    diagnostic sweeps only and are not automatically selected or performance-
+    qualified. Presence suppresses the complete automatic RTX 3090 profile,
+    including when the parsed value is 16.
+
+BZ_C29_FINE_SMALL=0 | 1 | 2
+    Manual C29 late-trim experiment: 0 uses the ordinary bitmap path, 1 uses
+    the exact table for buckets with at most 128 records, and 2 extends that
+    exact path through 256 records. Modes 1 and 2 require effective seed mode 6;
+    a configured sparse-trim path still takes precedence after its cutoff.
+
+    Presence of this variable suppresses the complete automatic RTX 3090
+    profile, even when set to 0, so setting only FINE_SMALL does not reproduce
+    the qualified profile. Mode 2 passes the physical correctness and exact
+    500-graph count/proof gates but measured 0.060205% slower than its adjacent
+    same-session midpoint. It is not promoted or performance-qualified.
+
+BZ_C29_PACKED_DIRECT=0 | 1
+    Manual, default-off C29 coarse-trim experiment for the exact sm_120
+    Blackwell 4096/0 compact profile. Exact value 1 keeps rounds 0 through 15
+    in the six-byte packed layout and ping-pongs two distinct F6 buffers,
+    replacing each ordinary F6-to-C8 trim plus C8-to-F6 rebucket pair with one
+    direct F6-to-F6 pass. It cannot be combined with sharded C8, sparse compact,
+    either late-layout experiment, CUDA Graph replay, or any other profile.
+    This switch suppresses automatic tuning and is not performance-qualified.
+
+BZ_C29_COARSE_PAIR_C6=0 | 1
+    C29 early-round layout selection for reviewed Blackwell schedules and the
+    complete SM80 profile described below. Exact value 1 replaces rounds 0 through 15
+    of the ordinary F6-to-C8-to-F6 path with an exact segmented six-byte
+    intermediate. The segment index retains both endpoint coarse prefixes and
+    each record retains both 23-bit suffixes; no endpoint bits, multiplicity,
+    proof recovery, share bytes, or consensus verification are approximated.
+
+    On Blackwell's ordinary schedule it may compose with the staged seed/rebucket pipeline modes 2, 4 or 8: both
+    nonblocking streams are drained before C6 reuses their scratch allocation.
+    It cannot be combined with direct packed trimming, sharded C8, sparse
+    compact, either late-layout experiment, or shared-cache
+    preference. Every capacity, malformed-record, or launch error sets the
+    existing sticky whole-graph rejection flag. This switch suppresses automatic
+    tuning and is not performance-qualified.
+
+    SM80 admits only the tested combined tuple: the complete packed base,
+    COARSE_PAIR_C6=1, DENSE_CAPACITY=4096, CUDA_GRAPH=1, TAIL_OVERLAP=1,
+    COUNT_SLAB=1, ROUNDS=256 and COARSE_ROUNDS=16. Its 70-SM, approximately
+    10-GiB automatic profile selects that tuple when measured memory permits.
+    Manual use must provide the whole tuple because any selector suppresses
+    automatic selection. Other SM80 combinations are rejected. See
+    docs/c29-cmp-6gb-20260912.md for correctness and performance evidence.
+
+    SM89 (Ada) admits the same tuple: the complete packed base,
+    COARSE_PAIR_C6=1, DENSE_CAPACITY=4096, CUDA_GRAPH=1, COUNT_SLAB=1,
+    ROUNDS=256, and COARSE_ROUNDS of 16, 32 or 48 with TAIL_OVERLAP either way.
+    It is both an automatic profile, applied on any Ada device with room for
+    the layout, and the 'c6-graph*' entries in the measured tuning ladder, so a
+    tuning device adopts a non-default variant only by winning.
+
+    The automatic Ada profile is COARSE_ROUNDS=16 without TAIL_OVERLAP on a
+    small die, and COARSE_ROUNDS=48 WITH TAIL_OVERLAP from 100 SMs up. The two
+    Ada dies measured differently and the larger one is unambiguous: on a
+    128-SM AD102, 58.9 +/- 0.1 ms/graph against 59.8 for 48 rounds without the
+    tail, 59.9 for 32 and 60.5 for 16, and 16.954 against 16.300 g/s on a live
+    pool. A 66-SM AD103 prefers 32 rounds to 48 and has a much smaller tail, so
+    it is excluded by the SM gate. See docs/c29-ada-20260920.md.
+
+BZ_C29_TAIL_OVERLAP=0 | 1
+    C29 scheduling optimization for reviewed Blackwell C6/4096 schedules and
+    the complete SM80 tuple above. Exact value 1 moves only CPU cycle discovery
+    to one managed depth-one worker. While graph N's CPU tail runs, the mining
+    thread may start graph N+1 and advance only through the solver-advertised
+    prefetch boundary; CUDA execution remains single-threaded.
+
+    Every completed tail is joined and finalized before the search ABI call
+    returns. The callback and its context are never retained. Nonce, keys, job id
+    and target live in an owned graph snapshot; if a prefetched graph no longer
+    matches the next call's canonical work, instance, job id or target, it is
+    synchronized and discarded, and its already reserved nonce is intentionally
+    skipped. Invalid values and partial/alternate tuples fail closed.
+
+    Presence suppresses automatic tuning even when set to 0. The SM80 automatic
+    profile enables this mode, as does the SM89 profile on a die of 100 SMs or
+    more - see COARSE_PAIR_C6 for that tuple and its evidence. The test-only
+    reduced-round selector remains for correctness diagnostics and does not
+    broaden production admission.
+
+BZ_C29_REBUCKET_TILE=1024 | 2048 | 3072
+    Manual C29 C8-to-F6 rebucket tile selection for packed-fine diagnostics.
+    The 3072-record form is a default-off per-warp-histogram experiment; it
+    requires packed-fine mode and cannot be combined with persistent rebucketing
+    (the persistent form remains fixed at 2048). Setting this variable suppresses
+    automatic tuning, so the rest of the intended manual tuple must also be
+    supplied. No 3072-record configuration is performance-qualified.
+
+BZ_C29_SEED_REBUCKET_PIPELINE=0 | 2 | 4 | 8
+    Manual, default-off C29 scheduling experiment for the exact sm_120
+    Blackwell 4096/0 compact profile. Nonzero values select the number of
+    persistent C8-to-F6 owner CTAs per coarse bucket. Eight staged seed chunks
+    alternate between two disjoint C8 scratch slots and two nonblocking CUDA
+    streams while each preceding chunk is rebucketed into one shared F6 image.
+    The output counters use atomic reservations and are cleared only once per
+    graph; both streams are drained before that image can be consumed or either
+    scratch allocation can be reused by coarse trimming.
+
+    Only the exact values shown are accepted. Modes 2, 4 and 8 require the full
+    retained staged96/packed-fine Blackwell tuple with DENSE_CAPACITY=4096 and
+    SPARSE_CAPACITY=0. They may compose with COARSE_PAIR_C6=1 after both pipeline
+    streams have drained. They cannot compose with seed overlap, sharded C8,
+    direct packed coarse trimming, CUDA Graph replay, either late-layout
+    experiment or shared-cache preference. Every capacity, malformed-record or
+    launch error sets the existing sticky whole-graph overflow flag. Endpoint
+    bytes, proof recovery and consensus verification are unchanged. Presence
+    suppresses the automatic RTX 3090 profile even when set to 0; no mode is
+    automatically selected or performance-qualified until its physical GPU
+    gates pass.
+
+BZ_C29_PACKED_LATE=0 | 1
+    Manual C29 layout experiment. Exact value 1 keeps the existing six-byte F6
+    records after coarse round 15, alternates distinct F6 buffers through exact
+    dense rounds 16 through 95, then uses the existing checked expansion before
+    sparse round 96. Counts through 128 use an exact table; larger dense buckets
+    use the exact local17 bitmap. Proof recovery and consensus verification are
+    unchanged.
+
+    This first candidate is restricted to CUDA sm_120 and every effective field
+    in the reviewed Blackwell tuple, with CUDA_GRAPH=0. Combining the two modes
+    fails closed pending a separate integration gate. Only exact 0 and 1 are
+    accepted. Presence suppresses the automatic RTX 3090 profile even when set
+    to 0; defaults and all automatic profiles keep it disabled. The separated
+    F6 low/high output stores require physical correctness and performance
+    evidence before any promotion.
+
+BZ_C29_SECTOR_LATE=0 | 1
+    Manual C29 layout experiment. Exact value 1 converts the existing split-
+    plane F6 records while executing dense round 16, keeps an exact six-byte
+    sector-interleaved layout through round 95, and expands once to ordinary F8
+    before sparse round 96. Each 32-record/192-byte tile consists of six aligned
+    32-byte sectors: 30 records place five low32 words followed by five high16
+    words per sector, while records 30 and 31 occupy the six two-byte sector
+    tails. Counts through 128 use an exact table; larger buckets use the exact
+    local17 bitmap. Proof recovery and consensus verification are unchanged.
+
+    This candidate is restricted to CUDA sm_120 and every effective field in the
+    reviewed Blackwell tuple, with CUDA_GRAPH=0 and PACKED_LATE=0. Combining
+    either incompatible mode fails closed. Only exact 0 and 1 are accepted.
+    Presence suppresses the automatic RTX 3090 profile even when set to 0;
+    defaults and all automatic profiles keep it disabled. The candidate has no
+    physical-GPU or performance qualification until a fresh controlled bracket.
+
+BZ_C29_C8_SHARDS=1 | 64
+    Manual C29 coarse-layout experiment. The default value 1 retains the
+    existing 64 coarse C8 buckets and counters. Exact value 64 instead stores
+    C8 records in 64 source-provenance shards by 64 destination-coarse buckets,
+    using 4,096 counters in the same total record allocation. Staged96 seed and
+    packed mark2 trim write the shard-major layout; a dedicated persistent
+    rebucket reconstructs the unchanged split-plane F6 buckets.
+
+    The first experiment is restricted to the exact ordinary CUDA sm_120
+    Blackwell tuple with DENSE_CAPACITY=4096 and SPARSE_CAPACITY=0. Every other
+    value or combination fails closed. Segment and output overflow set the
+    sticky whole-graph flag; no flagged graph is counted or submitted. Endpoint
+    bytes, multiplicity, recovery and proof verification are unchanged. A
+    per-segment capacity is probabilistic, so a long observed maximum-count
+    survey or an exact unsharded retry is required before promotion. Presence
+    suppresses the automatic RTX 3090 profile, including when set to 1.
+
+BZ_C29_DENSE_CAPACITY=0 | 2048 | 4096
+    Manual C29 F8-layout experiment. A nonzero value makes dense round 16 read
+    the existing full-stride split-plane F6 buckets, perform that round's exact
+    17-bit degree pruning, and expand canonical survivors directly into the
+    selected smaller ordinary F8 stride. Later dense rounds retain that stride.
+    If BZ_C29_SPARSE_CAPACITY is also nonzero, sparse round 96 performs the
+    separately checked F8-to-F8 transition into its selected stride; otherwise
+    sparse rounds and final collection continue with the dense stride.
+
+    Only the three exact values shown are accepted. Nonzero modes require a
+    reviewed Blackwell tuple or the complete SM80 tuple above (4096 only).
+    Unreviewed ownership and scheduling combinations fail closed.
+    Counts beyond either selected capacity set the sticky whole-
+    graph overflow flag, so no partial graph is counted or submitted. Endpoint
+    bytes, multiplicity, CPU peeling, nonce recovery and consensus verification
+    are unchanged. Presence suppresses the automatic RTX 3090 profile even when
+    set to 0. The SM80 automatic profile uses 4096, and so does the SM89 tuple
+    described under COARSE_PAIR_C6. On Ada that tuple is performance-qualified;
+    no other capacity is, until a fresh controlled correctness and comparison
+    bracket passes.
+
+BZ_C29_SPARSE_CAPACITY=0 | 256 | 512 | 1024 | 2048 | 4096
+    Manual C29 F8-layout experiment. A nonzero value makes sparse round 96 read
+    the current F8 stride (the ordinary 147456-record stride when
+    DENSE_CAPACITY=0, or the selected dense stride in the composed experiment),
+    perform that round's unchanged exact/folded pruning, and write directly into
+    the selected smaller stride. Rounds 97 through 255 and final collection then
+    use that compact stride.
+    Counts above either capacity set the sticky graph-overflow flag; such a graph
+    is discarded and never counted or submitted. Endpoint bytes, multiplicity,
+    CPU peeling, nonce recovery and consensus proof verification are unchanged.
+
+    Only the six exact values shown are accepted. Nonzero modes are restricted
+    to CUDA sm_120 and every effective setting in the reviewed ordinary Blackwell
+    tuple, including SPARSE_AFTER=96, SPARSE_BITS=14, SPARSE_THREADS=128,
+    SPARSE_SMALL=1 and SPARSE_EXACT128=1. CUDA_GRAPH, COUNT_SLAB, PACKED_LATE,
+    SECTOR_LATE, SPARSE_QUAD, shared-cache preference and other changed ownership
+    or schedule variants fail closed. The original r96-only eligibility requires
+    DENSE_CAPACITY=0; nonzero dense+sparse composition enters the stricter dense-
+    compact gate above. Presence suppresses the automatic RTX 3090 profile even
+    when set to 0; defaults and all automatic profiles keep the mode disabled. No
+    capacity is performance-qualified until a fresh controlled correctness and
+    comparison bracket passes.
+
+BZ_C29_BIND_BATCH=0 | 1
+    Manual C29 launch-path experiment: 1 reuses the selected fine-trim driver
+    function only within one advance. The sparse transition still rebinds, and
+    every reset, guarded launch, synchronization and exit/error drain remains.
+    Seed mode 6 and asynchronous trimming are required, as for the separate
+    FINE_BATCH=16/32 modes. This candidate is not automatically selected or
+    performance-qualified.
+
+BZ_C29_COUNT_SLAB=0 | 1
+    Manual C29 host-launch experiment: 1 allocates one private 16 KiB counter
+    slice for every late trim round (at most 8 MiB for 512 rounds), clears the
+    complete slab once per graph, and never reuses a destination counter slice.
+    The first late round still reads the ordinary current counters; subsequent
+    rounds consume the preceding slice, and collection consumes the final one.
+
+    Only exact values 0 and 1 are accepted, and mode 1 requires seed mode 6.
+    Presence suppresses the automatic RTX 3090 profile even when set to 0. The
+    SM80 automatic profile enables it within the complete tuple above, as does
+    the SM89 tuple described under COARSE_PAIR_C6. It does not change a kernel,
+    cubin or plugin ABI.
+
+BZ_C29_PACKED_TILE=1024 | 1536 | 1952
+    Packed-fine output staging records per tile. The 1952-record entry requires
+    PACKED_OVERLAY=1, PACKED_PIPELINE=1 and MARK_BATCH=2, using four candidate
+    records per thread with the last three warps masked on the fourth record.
+    It preserves the original 32-KiB shared footprint and exact degree marking.
+    Manual use requires the complete packed tuple because a present selector
+    suppresses automatic tuning. The measured CMP90 automatic profile uses 1952;
+    other existing automatic profiles retain their previous geometry.
+BZ_C29_CUDA_GRAPH=0 | 1
+    Manual C29 host-scheduling experiment. Exact value 1 captures the complete
+    fixed GPU schedule after the current graph key is uploaded: counter/flag
+    initialization, all eight fused seed chunks, packed rebucketing, 16 coarse
+    trim/rebucket rounds, packed expansion, rounds 16 through 255, and final
+    collection. It replays those ordered operations with one CUDA Graph launch
+    and one stream fence; only result-size/flag reads, the compact transfer and
+    CPU cycle search remain outside. Capture uses a private non-blocking stream;
+    every replay retains the normal security check and asynchronous device-loss
+    latch, and teardown drains/destroys the graph before its buffers and module.
+
+    Only exact values 0 and 1 are accepted. Mode 1 requires a reviewed Blackwell
+    tuple, the complete SM80 tuple above, the SM89 tuple described under
+    COARSE_PAIR_C6, or the complete packed base on
+    SM86/50-SM/approximately 10-GiB hardware with PACKED_TILE=1952; a
+    partial or changed tuple is rejected. Presence suppresses the automatic RTX
+    3090 profile even when set to 0. The SM80 automatic profile enables it.
+    The measured SM86/50-SM automatic profile selects PACKED_TILE=1952 and
+    CUDA_GRAPH=1 when live memory permits. Manual selectors and the six-GiB
+    limit suppress this promotion. See docs/c29-cmp90-throughput-20260913.md.
+    This scheduling change alters no kernel, cubin, proof, share or plugin
+    ABI and is not performance-qualified.
+
+BZ_C29_POLL_WAIT=0 | 1
+    Manual C29 host-scheduling switch, default off. Exact value 1 makes the
+    solver wait for a completed CUDA Graph by polling cuStreamQuery with a
+    yield between attempts, instead of blocking in cuStreamSynchronize. It
+    changes no kernel, cubin, tuple, proof, share or plugin ABI, and an
+    asynchronous device fault still enters the same lost-context latch, because
+    the polling path reports through the same checker.
+
+    It costs a runnable host thread for the whole of every graph, which is why
+    it is off by default and why it is NOT a tuning variable: naming it must
+    not suppress the device's automatic hardware profile the way the tuple
+    variables above do, so it is read straight from the process environment.
+
+    What it buys, MEASURED on a live pool at stock clocks on an RTX 4090
+    running the sm89-ad102-c6-graph-tail48 tuple: 17.180 g/s against 16.955
+    with the identical binary and the switch off, **+1.33%**, with board power
+    up 4 W. That is larger than the 0.38 ms per graph nsys attributed to the
+    blocking wait, because the profiler keeps the host warm and understates it.
+    On that card it is the difference between matching lolMiner 1.98a and
+    beating it by 1.4%.
+
+    Measure it on the card in hand rather than assuming: the gain is the
+    wake-up latency at the end of a graph, so it scales with how many graphs
+    per second the device completes and with nothing else. Only exact values 0
+    and 1 are accepted.
+
+BZ_C29_SPARSE_QUAD=0 | 1
+    Manual C29 late-trim scheduling experiment. Exact value 1 selects
+    c29_uv_trim_sparse_quad at the sparse cutoff: grid 1024, block 128, with
+    exactly four consecutive fine buckets owned by each CTA. Four warps process
+    <=32-record buckets concurrently through exact matching; after a barrier,
+    larger buckets reuse the existing exact33..128 or folded-bitmap semantics
+    sequentially. Counts above capacity flag the graph and are never read.
+
+    Only exact values 0 and 1 are accepted. Mode 1 currently requires seed mode
+    6, SPARSE_BITS=14, SPARSE_THREADS=128, SPARSE_SMALL=1 and
+    SPARSE_EXACT128=1. A SPARSE_AFTER cutoff below the trim-round count is also
+    needed to execute sparse trimming. Presence suppresses the automatic RTX
+    3090 profile even when set to 0; default and every automatic profile keep
+    this candidate disabled. It has no physical-GPU or performance qualification
+    and does not change the plugin ABI, retained pair format, proof or share.
+
+
+BACKEND GATES
+-------------
+
+--backends.cpu false
+--backends.cuda false
+--backends.opencl false
+    Skip a compute backend entirely. Useful to isolate one device for benchmarking, or
+    to stop a backend's host threads competing with the one you are measuring.
+
+--backends.opencl-include-owned-devices true
+    Let the OpenCL backend enumerate NVIDIA devices. Off by default because CUDA
+    already claims them and running both would double-book the same GPU.
+
+OPT-IN FEATURES
+---------------
+
+BZ_PEARL_ZK=1
+    Generate the ZK proof for a Pearl solution. Off by default: a share costs seconds
+    of CPU, so it is only wanted on the solo path.
+
+BZ_WEB_WORKERS=<n>
+    How many connections the built-in HTTP server can hold at once (default 32).
+    Each worker owns one connection for its lifetime, and a streamed LLM
+    completion holds one for seconds, so this is the server's concurrency. It was
+    4 - ample for a dashboard, and the ceiling on everything else: with 16 KV
+    slots and 16 clients the batch engine carried 3.92 rows a step and 258 tok/s,
+    where 32 workers give 15.67 rows and 578 tok/s. A worker parked in accept()
+    costs a stack and nothing else.
+
+BZ_LLM_SLOTS=<n>
+    Size the LLM's KV cache for n independent sequences (default 1), which is the
+    most Backend::decode_batch can step at once. A decode step reads every weight
+    in the model to make ONE token; B rows read them once for B tokens, so a given
+    token rate costs about a seventh of the memory bandwidth at B=8 - which is the
+    bandwidth a miner sharing the card is competing for. Costs 537 MB of VRAM per
+    slot for Llama 3.1 8B at 4096 context. Above 1 the OpenAI endpoint serves that
+    many requests at once (llm/batch_engine.*): 8 slots against 8 concurrent
+    streams is 258.5 tok/s where 1 slot is 99.1, on a 4090. At 1 slot the endpoint
+    is the one-at-a-time path it always was. llm_cli --batch B drives the backend
+    directly. Capped at 256.
+
+BZ_LLM_KV_FP8=<0|v|i|1>
+    Narrow the LLM's KV cache. Unset or 0 keeps it bf16, which is the default.
+    The cache is a large share of what a decode step reads - 44% of it at ctx 550
+    - so this is the largest single lever in the engine, worth ~4% of the token
+    rate on Qwen3-8B at 32 streams, and it halves what the cache costs in VRAM.
+      v   V in e4m3, K stays bf16. A quarter of the bytes. The safe setting.
+      i   K int8 with a scale per channel, V in e4m3. Half the bytes.
+      1   both halves e4m3. Half the bytes and WRONG ANSWERS on a checkpoint
+          whose K channels span widely - measured 14 of 20 against bf16's 18,
+          and failing degenerately ("Plantsantsantsantsants").
+    K and V are not alike. K's channels span 43x on a model without a per-head
+    q/k norm (max 420 against a median of 9.8, the massive-activation pattern),
+    and e4m3 carries four significant bits, so ~6% of relative error on a
+    dominant logit is ~2.2 after the 1/sqrt(d) scale and exp(2.2) is a 9x shift
+    in probability. V spans 3x and is AVERAGED under the softmax weights rather
+    than exponentiated, so the same error lands as noise. 'i' works where '1'
+    does not because int8's error is ABSOLUTE, so a per-channel scale buys
+    something real; the scale folds into q and costs nothing to apply, since
+    sum_c q_c k_c = sum_c (q_c s_c)(k_c / s_c).
+    Needs the batched path: refused with BZ_LLM_PREFILL_CHUNK=0 and in llm_cli,
+    whose single-sequence prefill reads and writes the cache as bf16. Also needs
+    head dim 128 and an unwindowed model, so Gemma 3 does not reach it and stays
+    bf16 whatever this is set to.
+
+BZ_LLM_SM_PARTITION=<n>
+    Confine the LLM to n of the GPU's streaming multiprocessors (CUDA 12.4+
+    driver) and give Pearl the rest - it reads the same variable and takes the
+    complement. For a rig mining CONTINUOUSLY while it serves: unpartitioned the
+    two compete for the block scheduler and the miner wins outright (a 4090 gives
+    289.9 TH/s and 2.2 tok/s), partitioned it becomes a dial (32 SMs to the model:
+    154.0 TH/s and 73.4 tok/s; 64 SMs: 81.8 TH/s and 85.2 tok/s). Costs the model
+    little on its own - 97.3 tok/s on 64 SMs and 93.9 on 32, against 97.4 on all
+    128 - because decode saturates memory bandwidth long before it runs out of
+    SMs. 0 (the default) uses the whole device.
+
+BZ_LLM_HEAD_INT8=1
+    Store the LLM's lm_head as int8 with one scale per output row instead of bf16.
+    It is the only tensor a pearl/w8a8 checkpoint leaves in bf16 and it is an
+    eighth of the bytes a decode step reads, so halving it is worth 3.4% of the
+    token rate on a 4090 and 1.2% on a 5090. Weight-only: the activations stay
+    f32. Off by default because it changes the logits and so can change a token -
+    factual answers and long-context retrieval are unaffected in testing, but
+    nothing here measures quality properly yet.
+
+BZ_PEARL_GEMM_NO_BUSY_GATE=1
+    Keep mining a GPU while the llm plugin is serving a request on it. By default
+    Pearl stands down for the life of a request and takes the card back the moment
+    it ends, because a search grid owns every SM and a decode step is a few hundred
+    small kernels that have to run in order. Turning the gate off is measured at
+    2.2 tok/s against 97.7 on a 4090 serving one stream - set this only on a rig
+    that wants the hashes whatever it costs the tokens.
+
+BZ_PEARL_GEMM_BUSY_HOLDOFF_MS=<n>
+    How long Pearl keeps standing down after the last llm request on a device,
+    in milliseconds (0 = resume immediately). The default is not a constant: it
+    follows the search launch the device actually measures, capped at 250 ms, and
+    stands in at 50 until one has been timed. A launch is 43 ms on a 5090 and 113
+    on a 4090, so one number could not have suited both. The gate is checked
+    before a search launch and the launch outlives the check, so on back-to-back
+    requests Pearl can start a kernel in the gap that then runs through the next
+    request - measured on a 5090 as 14% of the decode rate. Holding the gate shut
+    means a gap too short to mine safely is not mined; a server idle between
+    turns has gaps of seconds and gives up almost nothing.
+
+Quantus QUIC configuration
+    Use quantus.auth_token_file and quantus.tls_pin_file for node credentials,
+    or quantus.tls_pin for a pool's published certificate fingerprint. Without
+    an explicit token, the configured wallet.worker authenticates pool mining.
+    See plugins/internal/quantus/README.md for complete command examples.
+
+DIAGNOSTICS
+-----------
+
+These print to stderr or change timing; none are supported interfaces and any of them
+may disappear.
+
+BZ_ZK_PROFILE=1        per-stage timing for the ZK prover
+BZ_PEARL_CUDA_PIPELINE_TRACE=1
+    Log cumulative host-wall-time counters for CUDA search waits, attempt builds,
+    proof gathering, parameter upload, metadata and payload downloads, and proof
+    verification/submission. Also log job observation timestamps and discarded
+    look-ahead checks. Enable debug logging to see the counters. This preserves
+    production look-ahead and stream ordering; it does not use CUDA injection.
+    Stages are inclusive and overlap: do not sum them as GPU utilization, or
+    interpret host waits as kernel execution time. Diagnostic runs require fresh
+    uninstrumented controls before claiming a hashrate improvement.
+BZ_PEARL_CUDA_REUSE_IDENTICAL=1
+    Experimental CUDA resident-attempt reuse across notifications whose complete
+    serialized Pearl job, target, height and farm instance are identical. Off by
+    default. Old queued results are still drained and discarded at the clean-job
+    boundary; only matrix storage and the forward cursor are retained. No replay
+    of old tiles or proofs. Requires per-profile correctness/performance gates.
+BZ_PEARL_CUDA_DEFER_LOOKAHEAD=auto|0|1
+    Resident scheduling: finish proof handling and return to the worker's job
+    check before enqueueing another search. Default auto on SM86 mid/high,
+    Ada large and Blackwell direct profiles: defer after two job IDs within
+    30 seconds, returning to overlap after 30 seconds without another change.
+    Stable jobs retain overlap. Other profiles retain their previous default.
+    0 forces overlap; 1 forces deferral on any resident look-ahead profile.
+    Portable and synchronous Blackwell TMA paths are unaffected.
+    Keeps the same kernel, batch size and completed-work accounting. Trades CPU
+    proof/search overlap for less obsolete queued work after a job change.
+--network.primary-probe-s <n>    seconds between pool reachability probes (minimum 5)
+BZ_WARTHOG_SHAVERUS=<H/s>   pin the candidate rate each Warthog GPU is asked to
+                       deliver, skipping the janus search. Use only when you have
+                       already measured the peak for this rig; 0 = auto (default).
+BZ_WARTHOG_SHA_QUALITY=<pct>  nudge Warthog's balance point. Positive lets more,
+                       weaker sha candidates through to the verus workers.
+BZ_WARTHOG_AFFINITY=auto|group|none|pu   how Warthog's verus workers are placed.
+                       Default `auto`: preserve the CPU backend's one-PU placement
+                       when the machine has one L3 candidate ring; with several L3
+                       rings, confine each worker to the processors sharing its
+                       ring. `group` forces that L3-set placement. `pu` remaps each
+                       worker to one processor. `none` preserves backend placement
+                       on every topology.
+BZ_RX_THREADS=<n>      RandomX hashes in flight per GPU batch. Every hash in flight
+                       owns a 2 MiB scratchpad and the 2080 MiB dataset has to fit
+                       beside them, so the default is what memory holds - about
+                       10240 on a 24 GB card. Lower it to leave room for something
+                       else.
+BZ_RX_ITERS=<n>        run exactly this many RandomX VM iterations per kernel launch
+                       instead of adapting the chunk toward a quarter of a second.
+                       Same caution as BZ_CN_ITERS: a launch past about two seconds
+                       resets a Windows display GPU.
+BZ_RX_CUBIN=<file>     load this cubin for RandomX instead of the packed one.
+BZ_RX_CLBIN=<file>     load this native OpenCL binary for RandomX instead of the
+                       packed one. Both are the kernel-development loop, without
+                       repacking the plugin.
+BZ_CN_ITERS=<n>        run exactly this many CryptoNight loop iterations per kernel
+                       launch instead of adapting the chunk toward a quarter of a
+                       second. A launch past about two seconds resets a Windows
+                       display GPU, so do not set it high on one.
+BZ_CN_CUBIN=<file>     load this cubin for CryptoNight instead of the packed one -
+                       the kernel-development loop, without repacking the plugin.
+BZ_RANDOMX_LIGHT=1     mine RandomX from the 256 MiB cache instead of building the
+                       2080 MiB dataset. About a twentieth of the hashrate for a
+                       sixteenth of the memory; the miner falls back to it on its
+                       own when the dataset does not fit.
+--disable-1gb-huge-pages true
+                       Linux normally uses three reserved 1 GiB HugeTLB pages for
+                       the RandomX dataset when that pool is available, then falls
+                       back to explicit 2 MiB pages. This disables only the 1 GiB
+                       attempt, for same-binary A/B tests; --disable_huge_pages
+                       still disables every huge-page size.
+BZ_RX_PREFETCH=nta|t0|nosp|w
+                       how the RandomX code generator prefetches. Default: the
+                       dataset line non-temporally (it is read once) and the next
+                       iteration's two scratchpad lines normally. `t0` makes the
+                       dataset prefetch temporal, `nosp` drops the scratchpad
+                       prefetch, `w` asks for the scratchpad lines exclusive. All
+                       three measured slower on Zen 4; the knob is here because
+                       that is a claim about one cache hierarchy.
+BZ_RX_NATIVE_JIT=1     force bzminer's native RandomX VM emitter. Zen 4 normally
+                       selects the upstream-parity emitter; Zen 3, Zen 5, other
+                       x86 CPUs, and non-x86 CPUs keep their native runtime path.
+                       Diagnostic A/B switch only.
+BZ_RX_XMRIG_JIT=1      force the upstream-parity VM emitter on an x86-64 build.
+                       Diagnostic/correctness switch; production auto-selection
+                       is deliberately limited to measured Zen 4 models.
+BZ_RX_ARGON2=portable  force the scalar Argon2d block mixer used to build the
+                       RandomX cache, for A/B testing against the SSSE3 one. Both
+                       produce identical memory.
+BZ_WARTHOG_VERUS_KERNEL=portable|sse41|avx2|vaes|avx512
+                       force one runtime-verified Verus implementation for A/B
+                       testing. An unsupported tier is ignored safely; auto picks
+                       the fastest available tier.
+BZ_WARTHOG_INCLUDE_INTEGRATED=1  include an integrated/shared-memory OpenCL GPU
+                       beside a discrete GPU. Off by default because its memory
+                       traffic can remove more CPU Verus work than its SHA rate adds.
+BZ_WARTHOG_RING=<slots>  candidates per L3-local ring (rounded down to a power of
+                       two; default 1048576). The buffer should hold roughly a
+                       tenth of a second of candidates - deep enough that a worker
+                       never waits for the next GPU batch, shallow enough that a
+                       candidate is hashed while it is still worth hashing.
+BZ_PEARL_SOLO_POLL_MS  solo-mining node poll interval
+BZ_PEARL_SOLO_REFRESH_MS  solo-mining template refresh interval
+BZ_PEARL_WORKLOAD_M/N/K/RANK   override the proof-committed Pearl shape. M/N are
+    1..2^24; rank is a power of two from 128..1024; K is a multiple of 64 from
+    1024..65536 with 16*rank <= K <= 4*rank^2. Defaults are M=N=131072,
+    K=2048, rank=128. Pearl 1.3 scales target/work by an additional 128/rank,
+    so rank 256/512/1024 receives 1/2, 1/4, or 1/8 of its former target.
+    HeroMiners accepts legal noncanonical dense shapes; pools that pin the
+    stratum shape still require the shape supplied by the pool. The measured
+    The measured CMP 170HX/RTX 4070 Ti SUPER profile additionally uses N=262144;
+    do not assume that larger shape is optimal for another GPU generation.
+BZ_PEARL_WORKLOAD_TILE_H/W  dense tile-shape override. 8x16 is the default;
+    8x32 and 16x16 select legal 256-cell experimental shapes for pools that
+    accept flexible proof-committed shapes. Other pairs retain the default.
+BZ_AMD_DUMP=1          dump raw AMD ADL sensor records
+BZ_NV_DUMP=1           dump raw NVIDIA thermal sensor records
+BZ_NV_THERM_*          NVIDIA private thermal probing: RM/MMIO paths, scan ranges and
+                       the RISKY opt-in. Read bzgpu's source before touching these -
+                       they poke undocumented registers.
+BZ_NV_RMCMD/RMIN/RMSZ  NVIDIA RM escape command and buffer sizes, for the no-NVML path
+                       (GDDR timings no longer need an opt-in: they are read from
+                       the per-FBPA unicast registers, which are decoded on every
+                       generation. Windows uses RM reg-ops with a BAR0 fallback;
+                       Linux reads BAR0 directly and needs root for /dev/mem.)
+
+BZ_C29_OPENCL_BUCKET=0 | 1
+    Desktop Linux gfx1201 defaults to 1: optimized combined bucket trimming.
+    Set 0 for the reference gather path. Other architectures retain their existing
+    selection. Windows gfx1201 defaults to 0; its experimental bucket path remains
+    opt-in because intermittent first-batch reservation failures are unresolved.
+BZ_C29_OPENCL_COMBINED=0 | 1
+    Desktop Linux gfx1201 defaults to 1. Set 0 for the legacy serial bucket kernels.
+BZ_C29_OPENCL_TAIL_OVERLAP=0 | 1
+    Desktop Linux gfx1201 defaults to 1 with combined kernels; 0 selects serial
+    processing. Windows defaults to 0 and requires explicit BUCKET=1. A managed
+    CPU worker searches the completed residual while the GPU seeds the next graph.
+    Exact old-key recovery precedes proof/completed-graph credit. Explicitly
+    conflicting Linux switches fail initialization; unset switches follow defaults.

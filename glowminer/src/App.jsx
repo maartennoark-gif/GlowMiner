@@ -11,10 +11,23 @@ import {
 const inTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 const EX_TARGETS = ['BTC', 'USDT', 'LTC', 'ETH'];
 
+function fmtHs(hs) {
+  if (hs == null || !(hs > 0)) return '-';
+  if (hs >= 1e9) return (hs / 1e9).toFixed(2) + ' GH/s';
+  if (hs >= 1e6) return (hs / 1e6).toFixed(2) + ' MH/s';
+  if (hs >= 1e3) return (hs / 1e3).toFixed(2) + ' kH/s';
+  return Math.round(hs) + ' H/s';
+}
+function fmtUptime(s) {
+  s = Math.max(0, Math.floor(s || 0));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+  return (h > 0 ? h + 'h ' : '') + String(m).padStart(2, '0') + 'm ' + String(ss).padStart(2, '0') + 's';
+}
+
 export default function App() {
   const [tab, setTab] = useState('mining');
   const [cfg, setCfg] = useState({
-    coin: 'xna', wallets: {}, pools: {}, worker: 'GlowMiner',
+    coin: 'xna', mode: 'pool', wallets: {}, pools: {}, worker: 'GlowMiner',
     powerPct: 80, miner: 'bzminer', benchSec: 60,
     hashrates: { ...DEFAULT_HASHRATE },
     exEnabled: false, exTarget: 'BTC', exPct: 100, exAddress: '',
@@ -33,6 +46,13 @@ export default function App() {
   const [wcUri, setWcUri] = useState('');
   const [wcAccounts, setWcAccounts] = useState([]);
   const [wcBusy, setWcBusy] = useState(false);
+  const [logOpen, setLogOpen] = useState(false);
+  const [stats, setStats] = useState(null);
+  const [gpu, setGpu] = useState(null);
+  const [poolInfo, setPoolInfo] = useState(null);
+  const [poolLoading, setPoolLoading] = useState(false);
+  const [pinging, setPinging] = useState(false);
+  const [pingResults, setPingResults] = useState([]);
   const wtmCache = useRef(null);
   const btcCache = useRef(84000);
   const wcProvider = useRef(null);
@@ -94,7 +114,7 @@ export default function App() {
     try {
       await invoke('mine_start', { opts: {
         algo: coin.id, wallet: wallet.trim(), pool, worker: cfg.worker,
-        powerPct: Number(cfg.powerPct), minerKey: cfg.miner,
+        powerPct: Number(cfg.powerPct), minerKey: cfg.miner, mode: cfg.mode || 'pool',
         ex: { enabled: !!cfg.exEnabled, target: cfg.exTarget, pct: Number(cfg.exPct), address: (cfg.exAddress || '').trim() },
       }});
     } catch (e) { pushLog('Start failed: ' + e); }
@@ -138,6 +158,77 @@ export default function App() {
     if (wtmCache.current) applyEstimates(wtmCache.current, btcCache.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cfg.powerPct, cfg.hashrates]);
+
+  // Live-Polling während Mining läuft (Status, Hashrate, GPU)
+  useEffect(() => {
+    if (!inTauri || !running) return;
+    let dead = false;
+    async function poll() {
+      try {
+        const s = await invoke('mine_stats');
+        if (!dead) setStats(s);
+      } catch { /* noop */ }
+      try {
+        const g = await invoke('gpu_stats');
+        if (!dead) setGpu(g);
+      } catch { /* noop */ }
+    }
+    poll();
+    const t = setInterval(poll, 5000);
+    return () => { dead = true; clearInterval(t); };
+  }, [running]);
+
+  // Pool-Livedaten bei Coin-Wechsel laden
+  async function loadPoolInfo(tag) {
+    const wt = (COINS.find((c) => c.id === (tag || cfg.coin)) || {}).woolyTag;
+    if (!inTauri || !wt) { setPoolInfo(wt ? null : { supported: false }); return; }
+    setPoolLoading(true);
+    try {
+      const info = await invoke('pool_stats', { tag: wt });
+      setPoolInfo(info);
+    } catch (e) {
+      setPoolInfo({ supported: false, error: String(e) });
+    }
+    setPoolLoading(false);
+  }
+  useEffect(() => {
+    loadPoolInfo(cfg.coin);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cfg.coin]);
+
+  function setMode(m) {
+    const c = COINS.find((x) => x.id === cfg.coin);
+    if (m === 'solo' && (!c.soloPools || !c.soloPools.length)) {
+      pushLog('Solo: kein bekannter Solo-Port für diesen Coin/Pool - siehe Pool-Seite.');
+      return;
+    }
+    const targetPool = m === 'solo' ? c.soloPools[0] : c.pools[0];
+    setCfg((p) => ({ ...p, mode: m, pools: { ...p.pools, [c.id]: targetPool } }));
+    pushLog(`Modus: ${m.toUpperCase()} - Pool: ${targetPool}`);
+  }
+
+  async function findBestPool() {
+    if (!inTauri) return pushLog('Available only in the app build.');
+    const c = COINS.find((x) => x.id === cfg.coin);
+    const hosts = [...c.pools, ...(c.soloPools || [])];
+    setPinging(true);
+    setPingResults([]);
+    try {
+      const res = await invoke('pool_ping', { hosts });
+      setPingResults(res);
+      const ok = res.filter((r) => r.ms != null).sort((a, b) => a.ms - b.ms);
+      if (ok.length) {
+        const best = ok[0];
+        setCfg((p) => ({ ...p, pools: { ...p.pools, [c.id]: best.host } }));
+        const soloHit = (c.soloPools || []).includes(best.host);
+        if (soloHit) setCfg((p) => ({ ...p, mode: 'solo' }));
+        pushLog(`Bester Pool: ${best.host} (${best.ms} ms) - übernommen.`);
+      } else {
+        pushLog('Kein Pool erreichbar - Firewall/Internet prüfen.');
+      }
+    } catch (e) { pushLog('Pool-Suche fehlgeschlagen: ' + e); }
+    setPinging(false);
+  }
 
   const filtered = rows.filter((r) => {
     const q = search.trim().toLowerCase();
@@ -208,9 +299,12 @@ export default function App() {
       {!inTauri && <p className="hint">Browser preview: mining and benchmark only run in the app build.</p>}
 
       <div className="tabs">
-        {[['mining', 'Mining'], ['coins', 'Coins'], ['wallets', 'Wallets'], ['log', 'Log']].map(([id, label]) => (
+        {[['mining', 'Mining'], ['coins', 'Coins'], ['wallets', 'Wallets']].map(([id, label]) => (
           <button key={id} className={'tab' + (tab === id ? ' active' : '')} onClick={() => setTab(id)}>{label}</button>
         ))}
+        <button className={'tab' + (logOpen ? ' active' : '')} onClick={() => setLogOpen((v) => !v)}>
+          {logOpen ? 'Logs ausblenden' : 'Logs einblenden'}
+        </button>
         <span className="status" style={{ marginLeft: 'auto', alignSelf: 'center' }}>
           {running ? 'MINING' : 'READY'}
         </span>
@@ -218,6 +312,107 @@ export default function App() {
 
       {tab === 'mining' && (
         <>
+          <div className="dash">
+            <div className="dashcard">
+              <div className="label">Status</div>
+              <div className="dashbig">{running ? 'MINING' : 'READY'}</div>
+              <div className="hint">
+                {(stats?.miner || cfg.miner)} - {(stats?.mode || cfg.mode || 'pool').toUpperCase()} - {(stats?.algo || coin.id).toUpperCase()}
+                {stats ? ` - Uptime ${fmtUptime(stats.uptime_s)}` : ''}
+              </div>
+            </div>
+            <div className="dashcard">
+              <div className="label">Hashrate (live)</div>
+              <div className="dashbig">{stats && stats.hashrate_hs > 0 ? fmtHs(stats.hashrate_hs) : '-'}</div>
+              <div className="hint">
+                {(() => {
+                  const r = rows.find((x) => x.tag === coin.tag && x.perday != null);
+                  return r ? `Erwartet ca. ${fmt(r.perday)} ${coin.symbol}/Tag` : 'Estimate im Coins-Tab laden';
+                })()}
+              </div>
+            </div>
+            <div className="dashcard">
+              <div className="label">GPU</div>
+              <div className="dashbig">
+                {(() => {
+                  if (gpu?.nvidia?.length) {
+                    const g = gpu.nvidia[0];
+                    return (g.temp_c ?? '-') + ' C';
+                  }
+                  if (gpu?.amd_temp_c != null) return Math.round(gpu.amd_temp_c) + ' C';
+                  return '-';
+                })()}
+              </div>
+              <div className="hint">
+                {(() => {
+                  if (gpu?.nvidia?.length) {
+                    const g = gpu.nvidia[0];
+                    return `Last ${g.util_pct ?? '-'}% - ${g.power_w ?? '-'}W - Lüfter ${g.fan_pct ?? '-'}%${gpu.nvidia.length > 1 ? ` (+${gpu.nvidia.length - 1} GPUs)` : ''}`;
+                  }
+                  if (gpu?.amd_temp_c != null) return 'AMD: Temp aus Miner-Log (Richtwert)';
+                  return running ? 'Läuft - noch keine GPU-Daten' : 'Startet mit Mining';
+                })()}
+              </div>
+            </div>
+            <div className="dashcard">
+              <div className="label">Shares</div>
+              <div className="dashbig">{stats ? `${stats.accepted} ok` : '-'}</div>
+              <div className="hint">{stats ? `${stats.rejected} rejected/stale` : 'aus Miner-Log gezählt'}</div>
+            </div>
+            <div className="dashcard">
+              <div className="label">Pool</div>
+              <div className="dashbig" style={{ fontSize: 16 }}>
+                {poolInfo?.supported ? `${poolInfo.stats.fee}% Fee` : (poolInfo && !poolInfo.supported ? 'Extern' : '-')}
+              </div>
+              <div className="hint">
+                {poolLoading ? 'Lade Pooldaten' :
+                  poolInfo?.supported ? (() => {
+                    const st = poolInfo.stats;
+                    const mode = (stats?.mode || cfg.mode || 'pool').toUpperCase();
+                    const m = (st.modes || []).find((x) => (x.payoutScheme || '').toUpperCase() === mode)
+                      || (st.modes || [])[0] || {};
+                    const ph = m.algo_stats?.default?.hashrate;
+                    return `Effort ${mode}: ${Math.round((m.effort || 0) * 100)}% - Pool-HR ${ph ? fmtHs(ph) : '-'} - Miner ${m.algo_stats?.default?.minersTotal ?? '-'}`;
+                  })() : 'Live-Daten nur für WoolyPooly-Coins'}
+              </div>
+            </div>
+          </div>
+
+          <div className="card">
+            <h3>MODUS + POOL</h3>
+            <div className="row">
+              <button className={'tab' + ((cfg.mode || 'pool') === 'pool' ? ' active' : '')}
+                onClick={() => setMode('pool')}>Pool (PPLNS)</button>
+              <button className={'tab' + (cfg.mode === 'solo' ? ' active' : '')}
+                onClick={() => setMode('solo')}
+                title={coin.soloPools?.length ? '' : 'Kein Solo-Port bekannt'}>Solo</button>
+              <button className="btn" disabled={pinging || !inTauri} onClick={findBestPool}>
+                {pinging ? 'Messe' : 'Besten Pool finden'}
+              </button>
+              <button className="btn" disabled={poolLoading} onClick={() => loadPoolInfo(cfg.coin)}>Pool-Daten</button>
+            </div>
+            {!coin.soloPools?.length && (
+              <div className="hint">Solo: für diesen Coin/Pool ist kein Solo-Port bekannt - bitte Pool-Seite prüfen.</div>
+            )}
+            {pingResults.length > 0 && (
+              <div style={{ marginTop: 8, fontFamily: 'Consolas, monospace', fontSize: 12 }}>
+                {pingResults.map((r) => <div key={r.host}>- {r.host}: {r.ms == null ? 'timeout' : r.ms + ' ms'}</div>)}
+              </div>
+            )}
+            <div className="grid2" style={{ marginTop: 8 }}>
+              <div>
+                <div className="label">Pool (editierbar)</div>
+                <input type="text" value={pool}
+                  onChange={(e) => setCfg((p) => ({ ...p, pools: { ...p.pools, [coin.id]: e.target.value } }))} />
+              </div>
+              <div>
+                <div className="label">Worker</div>
+                <input type="text" value={cfg.worker}
+                  onChange={(e) => setCfg((p) => ({ ...p, worker: e.target.value }))} />
+              </div>
+            </div>
+          </div>
+
           <div className="card">
             <h3>COIN + MINER</h3>
             <div className="grid2">
@@ -272,18 +467,7 @@ export default function App() {
                 value={wallet} onChange={(e) => setWallet(coin.id, e.target.value)} />
               <button className="btn" onClick={() => pasteInto((v) => setWallet(coin.id, v))}>Paste</button>
             </div>
-            <div className="grid2" style={{ marginTop: 8 }}>
-              <div>
-                <div className="label">Pool (editable)</div>
-                <input type="text" value={pool}
-                  onChange={(e) => setCfg((p) => ({ ...p, pools: { ...p.pools, [coin.id]: e.target.value } }))} />
-              </div>
-              <div>
-                <div className="label">Worker</div>
-                <input type="text" value={cfg.worker}
-                  onChange={(e) => setCfg((p) => ({ ...p, worker: e.target.value }))} />
-              </div>
-            </div>
+            <div className="hint">Start-Adresse: {coin.symbol}-Format (z.B. xel:...) oder Exchange-Deposit für Direkt-Mining.</div>
           </div>
 
           <div className="card">
@@ -456,14 +640,18 @@ export default function App() {
         </>
       )}
 
-      {tab === 'log' && (
-        <div className="log" ref={logRef}>
-          {log.map((l, i) => <div key={i}>{l}</div>)}
-        </div>
-      )}
-      {tab !== 'log' && (
-        <div className="log" style={{ height: 150 }}>
-          {log.slice(-30).map((l, i) => <div key={i}>{l}</div>)}
+      {logOpen && (
+        <div className="drawer">
+          <div className="drawerhead">
+            <b>LOGS</b>
+            <div className="row">
+              <button className="btn" onClick={() => setLog([])}>Clear</button>
+              <button className="btn" onClick={() => setLogOpen(false)}>Ausblenden</button>
+            </div>
+          </div>
+          <div className="log drawerlog" ref={logRef}>
+            {log.map((l, i) => <div key={i}>{l}</div>)}
+          </div>
         </div>
       )}
     </div>

@@ -2,6 +2,7 @@
 // Exchange-Rotation, Config. Kein OC/UV — nur Intensity-Parameter.
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -78,11 +79,49 @@ struct AppState {
     child: Option<Child>,
     run_id: u64,          // Generation: alte Rotations-/Reader-Tasks sterben
     bench_running: bool,
+    // Live-Statistiken
+    recent: VecDeque<String>,
+    accepted: u64,
+    rejected: u64,
+    last_hs: f64,
+    last_hs_at: Option<Instant>,
+    started_at: Option<Instant>,
+    mode: String,
+    algo: String,
+    miner_key: String,
 }
 
 impl Default for AppState {
     fn default() -> Self {
-        Self { child: None, run_id: 0, bench_running: false }
+        Self {
+            child: None, run_id: 0, bench_running: false,
+            recent: VecDeque::new(), accepted: 0, rejected: 0,
+            last_hs: 0.0, last_hs_at: None, started_at: None,
+            mode: "pool".into(), algo: String::new(), miner_key: String::new(),
+        }
+    }
+}
+
+/// Eine Miner-Output-Zeile auswerten: Shares zählen, Hashrate + Temp merken.
+fn ingest_line(state: &Arc<Mutex<AppState>>, line: &str) {
+    let hs = parse_hs(line);
+    let lower = line.to_lowercase();
+    let acc = lower.matches("accepted").count() as u64;
+    let rej = lower.matches("rejected").count() as u64
+        + lower.matches("stale").count() as u64
+        + lower.matches("invalid").count() as u64;
+    let mut s = state.lock().unwrap();
+    if hs > 0.0 {
+        s.last_hs = hs;
+        s.last_hs_at = Some(Instant::now());
+    }
+    s.accepted += acc;
+    // "rejected" enthält kein "accepted"? "rejected" enthält nicht "accepted" — ok.
+    // Aber "share accepted" vs "accepted share rejected": rej-Zeilen mit accepted abziehen
+    s.rejected += rej;
+    s.recent.push_back(line.to_string());
+    while s.recent.len() > 300 {
+        s.recent.pop_front();
     }
 }
 
@@ -175,6 +214,8 @@ struct MineStartOpts {
     #[serde(rename = "minerKey")]
     miner_key: String,
     ex: Option<ExOpts>,
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -341,6 +382,7 @@ fn spawn_and_stream(app: AppHandle, exe: PathBuf, args: Vec<String>, tag: String
                 if state2.lock().unwrap().run_id != run_id {
                     break;
                 }
+                ingest_line(&state2, &line);
                 emit_log(&app2, &line);
             }
         });
@@ -354,6 +396,7 @@ fn spawn_and_stream(app: AppHandle, exe: PathBuf, args: Vec<String>, tag: String
                 if state2.lock().unwrap().run_id != run_id {
                     break;
                 }
+                ingest_line(&state2, &line);
                 emit_log(&app2, &line);
             }
         });
@@ -403,6 +446,16 @@ fn mine_start(app: AppHandle, state: State<Arc<Mutex<AppState>>>, opts: MineStar
     let run_id = {
         let mut s = state.lock().unwrap();
         s.run_id += 1;
+        // Statistiken zurücksetzen
+        s.recent.clear();
+        s.accepted = 0;
+        s.rejected = 0;
+        s.last_hs = 0.0;
+        s.last_hs_at = None;
+        s.started_at = Some(Instant::now());
+        s.mode = opts.mode.clone().unwrap_or_else(|| "pool".into());
+        s.algo = algo.clone();
+        s.miner_key = key.clone();
         s.run_id
     };
 
@@ -771,6 +824,133 @@ fn bench_one_timed(app: &AppHandle, key: &str, opts: &BenchOpts, sec: u64) -> Be
     r
 }
 
+// ---------------- Live-Status, GPU, Pool ----------------
+#[tauri::command]
+fn mine_stats(state: State<Arc<Mutex<AppState>>>) -> serde_json::Value {
+    let s = state.lock().unwrap();
+    let running = s.child.is_some();
+    let uptime_s = s.started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+    let hs_age_s = s.last_hs_at.map(|t| t.elapsed().as_secs());
+    serde_json::json!({
+        "running": running,
+        "uptime_s": uptime_s,
+        "hashrate_hs": s.last_hs,
+        "hs_age_s": hs_age_s,
+        "accepted": s.accepted,
+        "rejected": s.rejected,
+        "mode": s.mode,
+        "algo": s.algo,
+        "miner": s.miner_key,
+    })
+}
+
+#[derive(Serialize)]
+struct GpuInfo {
+    idx: i64,
+    temp_c: Option<f64>,
+    util_pct: Option<f64>,
+    power_w: Option<f64>,
+    fan_pct: Option<f64>,
+}
+
+#[tauri::command]
+fn gpu_stats(state: State<Arc<Mutex<AppState>>>) -> serde_json::Value {
+    // NVIDIA: nvidia-smi (exakt). AMD: Temperatur aus Miner-Logzeilen (best effort).
+    let mut nvidia: Vec<GpuInfo> = Vec::new();
+    if let Ok(out) = Command::new("nvidia-smi")
+        .args(["--query-gpu=index,temperature.gpu,utilization.gpu,power.draw,fan.speed",
+               "--format=csv,noheader,nounits"])
+        .output()
+    {
+        if out.status.success() {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                let p: Vec<&str> = line.split(',').map(|x| x.trim()).collect();
+                let num = |i: usize| p.get(i).and_then(|v| v.parse::<f64>().ok());
+                if let Some(idx) = num(0) {
+                    nvidia.push(GpuInfo {
+                        idx: idx as i64, temp_c: num(1), util_pct: num(2),
+                        power_w: num(3), fan_pct: num(4),
+                    });
+                }
+            }
+        }
+    }
+    // AMD-Fallback: letzte plausible "NN C"-Angabe aus dem Miner-Log
+    let amd_temp = {
+        let s = state.lock().unwrap();
+        let re = Regex::new(r"(\d{2,3})\s?°?C\b").unwrap();
+        let mut temp: Option<f64> = None;
+        for line in s.recent.iter().rev().take(80) {
+            for cap in re.captures_iter(line) {
+                if let Ok(v) = cap[1].parse::<f64>() {
+                    if (30.0..=110.0).contains(&v) {
+                        temp = Some(v);
+                        break;
+                    }
+                }
+            }
+            if temp.is_some() {
+                break;
+            }
+        }
+        temp
+    };
+    serde_json::json!({ "nvidia": nvidia, "amd_temp_c": amd_temp })
+}
+
+#[tauri::command]
+fn pool_stats(tag: String) -> Result<serde_json::Value, String> {
+    // WoolyPooly Stats-API (öffentlich): Fee, MinPay, Effort PPLNS/SOLO, Hashrates.
+    // Tags: xna, xel (clore/dynex laufen nicht über WoolyPooly).
+    let slug = match tag.to_lowercase().as_str() {
+        "xna" => "xna-1",
+        "xel" | "xelis" => "xel-1",
+        _ => return Ok(serde_json::json!({ "supported": false })),
+    };
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("glowminer")
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let v: serde_json::Value = client
+        .get(format!("https://api.woolypooly.com/api/{slug}/stats"))
+        .send()
+        .map_err(|e| e.to_string())?
+        .json()
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "supported": true, "stats": v }))
+}
+
+#[derive(Serialize)]
+struct PingResult {
+    host: String,
+    ms: Option<u128>,
+}
+
+#[tauri::command]
+fn pool_ping(hosts: Vec<String>) -> Vec<PingResult> {
+    hosts
+        .into_iter()
+        .map(|h| {
+            // "stratum+tcp://host:port" -> "host:port"
+            let addr = h
+                .trim_start_matches("stratum+tcp://")
+                .trim_start_matches("stratum+ssl://")
+                .to_string();
+            let ms = std::net::ToSocketAddrs::to_socket_addrs(addr.as_str())
+                .ok()
+                .and_then(|mut it| it.next())
+                .and_then(|sock| {
+                    let t = Instant::now();
+                    std::net::TcpStream::connect_timeout(&sock, Duration::from_secs(4))
+                        .ok()
+                        .map(|_| t.elapsed().as_millis())
+                });
+            PingResult { host: h, ms }
+        })
+        .collect()
+}
+
 pub fn run() {
     let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
     tauri::Builder::default()
@@ -785,6 +965,10 @@ pub fn run() {
             defender_exclude,
             mine_start,
             mine_stop,
+            mine_stats,
+            gpu_stats,
+            pool_stats,
+            pool_ping,
             bench_start,
         ])
         .run(tauri::generate_context!())

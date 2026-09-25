@@ -1,0 +1,4 @@
+----------------------------------------------------------------------------------------------------
+Miner started at 2026-09-25 21:14:02 with: F:\mining\onezerominer\onezerominer.exe --algo dynex --pool fr-dynex.miningocean.org:3332 --wallet 3jUJgUVGcRMmjZcydSwFubk9VVjwCWbQsQDET45QwVYs.7900XTX --pass x
+----------------------------------------------------------------------------------------------------
+2026-09-25 21:14:02 [Error] dynex is not supported on AMD. Use --disable-amd to disable AMD devices or -d to filter them out

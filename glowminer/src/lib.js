@@ -1,35 +1,40 @@
 // Geteilte Daten & Estimate-Logik (Renderer).
 export const COINS = [
   {
-    id: 'xna', name: 'Neurai', symbol: 'XNA', tag: 'XNA',
+    id: 'xna', name: 'Neurai', symbol: 'XNA', tag: 'XNA', woolyTag: 'xna',
     desc: 'AI-IoT Layer-1 (KawPow)',
     pools: ['stratum+tcp://pool.woolypooly.com:3128', 'stratum+tcp://xna.2miners.com:6060'],
+    // WoolyPooly nutzt für SOLO denselben Port wie PPLNS
+    soloPools: ['stratum+tcp://pool.woolypooly.com:3128'],
     exchangeUrl: 'https://www.mexc.com/exchange/XNA_USDT',
   },
   {
-    id: 'clore', name: 'Clore.ai', symbol: 'CLORE', tag: 'CLORE',
+    id: 'clore', name: 'Clore.ai', symbol: 'CLORE', tag: 'CLORE', woolyTag: null,
     desc: 'AI-Compute Marktplatz (KawPow)',
     pools: ['stratum+tcp://pool.woolypooly.com:3118', 'stratum+tcp://clore.2miners.com:6060'],
+    soloPools: [],
     exchangeUrl: 'https://www.mexc.com/exchange/CLORE_USDT',
   },
   {
-    id: 'dynex', name: 'Dynex', symbol: 'DNX', tag: 'DNX',
+    id: 'dynex', name: 'Dynex', symbol: 'DNX', tag: 'DNX', woolyTag: null,
     desc: 'AI-PoUW neuromorphic (DynexSolve)',
     pools: [
       'stratum+tcp://fr-dynex.miningocean.org:3332',
       'stratum+tcp://dnx.neuropool.net:2222',
       'stratum+tcp://us-east.dnx.minenow.space:18443',
     ],
+    soloPools: [],
     exchangeUrl: 'https://nonkyc.io/market/DNX_USDT',
   },
   {
-    id: 'xelis', name: 'Xelis', symbol: 'XEL', tag: 'XEL',
+    id: 'xelis', name: 'Xelis', symbol: 'XEL', tag: 'XEL', woolyTag: 'xel',
     desc: 'Privacy-BlockDAG (XelisHashV3)',
     pools: [
       'stratum+tcp://pool.woolypooly.com:3150',
       'stratum+tcp://pool.eu.woolypooly.com:3150',
       'stratum+tcp://xelis.cedric-crispin.com:4404',
     ],
+    soloPools: ['stratum+tcp://pool.woolypooly.com:3151'],
     exchangeUrl: 'https://www.mexc.com/exchange/XEL_USDT',
   },
 ];
