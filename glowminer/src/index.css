@@ -70,3 +70,18 @@ table.est tr.star td:first-child { color: #fff; font-weight: 700; text-shadow: 0
 .pill { display: inline-block; border: 1px solid #fff; padding: 2px 10px; font-size: 11px; margin-right: 6px; }
 .pill.dim { border-color: var(--border); color: var(--dim); }
 a.btn { text-decoration: none; display: inline-block; }
+/* Dashboard */
+.dash { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.dashcard { background: var(--panel); border: 1px solid var(--border); padding: 12px; }
+.dashcard .dashbig { font-size: 24px; font-weight: 700; color: #fff;
+  text-shadow: 0 0 10px rgba(255,255,255,.5); margin: 2px 0 4px; }
+/* Log-Drawer (seitlich einklappbar) */
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 92vw);
+  background: #030303; border-left: 1px solid #fff;
+  box-shadow: -12px 0 40px rgba(255,255,255,.12);
+  display: flex; flex-direction: column; padding: 14px; z-index: 50;
+}
+.drawerhead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.drawerhead b { letter-spacing: 3px; }
+.drawerlog { flex: 1; height: auto; }

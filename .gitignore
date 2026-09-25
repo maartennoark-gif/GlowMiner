@@ -7,3 +7,10 @@ target/
 node_modules/
 config.json
 *.zip
+*.log
+# Geladene Miner-Binaries (werden von der App nachgeladen)
+bzminer/
+teamredminer/
+srbminer/
+wildrig/
+onezerominer/
