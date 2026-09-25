@@ -2,7 +2,7 @@
 // Exchange-Rotation, Config. Kein OC/UV — nur Intensity-Parameter.
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -928,8 +928,7 @@ struct PingResult {
 }
 
 #[tauri::command]
-fn pool_ping(hosts: Vec<String>) -> Vec<PingResult> {
-    hosts
+fn pool_ping(hosts: Vec<String>) -> Vec<PingResult> {    hosts
         .into_iter()
         .map(|h| {
             // "stratum+tcp://host:port" -> "host:port"
@@ -951,6 +950,151 @@ fn pool_ping(hosts: Vec<String>) -> Vec<PingResult> {
         .collect()
 }
 
+#[tauri::command]
+fn app_version(app: AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
+// Börsenplatz je Coin (WhatToMine liefert nur Volumen, keine Namen)
+fn venue(tag: &str) -> &'static str {
+    match tag {
+        "XNA" => "MEXC (XNA/USDT)",
+        "CLORE" => "MEXC / Gate (CLORE/USDT)",
+        "DNX" => "NonKYC (DNX/USDT)",
+        "RVN" => "Binance / MEXC u.a.",
+        "XEL" => "MEXC / CoinEx",
+        "ERG" => "KuCoin / Gate u.a.",
+        "CFX" => "Binance u.a.",
+        "IRON" => "MEXC / Gate",
+        "KLS" | "PYI" => "kaum gelistet",
+        "EPIC" => "NonKYC",
+        "XTM" => "CoinEx / Gate",
+        "ZANO" => "CoinEx / MEXC",
+        "ETC" => "Binance / Coinbase u.a.",
+        "ETHW" => "MEXC / Gate",
+        "NEXA" => "MEXC / CoinEx",
+        "MEWC" => "NonKYC",
+        "NEOX" => "MEXC",
+        "QUAI" => "MEXC",
+        "FLUX" | "FIRO" => "Binance u.a.",
+        _ => "-",
+    }
+}
+
+fn is_mineable(tag: &str) -> bool {
+    matches!(tag, "XNA" | "CLORE" | "DNX" | "XEL")
+}
+
+/// Zahl aus JSON lesen (WhatToMine liefert manche Felder als String, z.B. block_time "60.0")
+fn f64_val(v: Option<&serde_json::Value>) -> f64 {
+    match v {
+        Some(serde_json::Value::Number(n)) => n.as_f64().unwrap_or(0.0),
+        Some(serde_json::Value::String(s)) => s.parse::<f64>().unwrap_or(0.0),
+        _ => 0.0,
+    }
+}
+
+#[derive(Deserialize)]
+struct EstReq {
+    #[serde(rename = "powerPct")]
+    power_pct: f64,
+    hashrates: HashMap<String, f64>,
+}
+
+/// Coin-Schätzungen serverseitig holen (kein Browser-CORS-Problem):
+/// WhatToMine live + BTC-Preis (CoinGecko -> Coinbase -> Fallback).
+#[tauri::command]
+fn estimates_fetch(req: EstReq) -> Result<serde_json::Value, String> {
+    let scale = (req.power_pct / 100.0).clamp(0.05, 1.0);
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) GlowMiner")
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Netzwerk: {e}"))?;
+    let coins: serde_json::Value = client
+        .get("https://whattomine.com/coins.json")
+        .send()
+        .map_err(|e| format!("WhatToMine nicht erreichbar: {e}"))?
+        .json()
+        .map_err(|e| format!("WhatToMine-Format: {e}"))?;
+    let map = coins
+        .get("coins")
+        .and_then(|c| c.as_object())
+        .ok_or_else(|| "WhatToMine-Format: kein coins-Feld".to_string())?;
+
+    // BTC-Preis mit Fallbacks
+    let mut btc = 84000.0;
+    let mut btc_src = "Fallback";
+    if let Ok(r) = client
+        .get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd")
+        .send()
+    {
+        if let Ok(j) = r.json::<serde_json::Value>() {
+            if let Some(v) = j.pointer("/bitcoin/usd").and_then(|x| x.as_f64()) {
+                btc = v;
+                btc_src = "CoinGecko";
+            }
+        }
+    }
+    if btc_src == "Fallback" {
+        if let Ok(r) = client.get("https://api.coinbase.com/v2/prices/BTC-USD/spot").send() {
+            if let Ok(j) = r.json::<serde_json::Value>() {
+                if let Some(s) = j.pointer("/data/amount").and_then(|x| x.as_str()) {
+                    if let Ok(v) = s.parse::<f64>() {
+                        btc = v;
+                        btc_src = "Coinbase";
+                    }
+                }
+            }
+        }
+    }
+
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    for (name, c) in map {
+        let tag = c.get("tag").and_then(|t| t.as_str()).unwrap_or("").to_string();
+        let algo = c.get("algorithm").and_then(|t| t.as_str()).unwrap_or("").to_string();
+        let base = match req.hashrates.get(&algo) {
+            Some(&b) if b > 0.0 => b,
+            _ => continue,
+        };
+        let nethash = f64_val(c.get("nethash"));
+        let btime = f64_val(c.get("block_time"));
+        let reward = f64_val(c.get("block_reward"));
+        if nethash <= 0.0 || btime <= 0.0 {
+            continue;
+        }
+        let user_hs = base * scale;
+        let perday = user_hs / nethash * (86400.0 / btime) * reward;
+        let rate_btc = f64_val(c.get("exchange_rate"));
+        let vol_btc = f64_val(c.get("exchange_rate_vol"));
+        let market_cap = c.get("market_cap").and_then(|m| m.as_str()).unwrap_or("-");
+        rows.push(serde_json::json!({
+            "key": format!("{tag}|{name}"),
+            "tag": tag,
+            "name": name.chars().take(24).collect::<String>(),
+            "algo": algo,
+            "perday": perday,
+            "usd": perday * rate_btc * btc,
+            "vol": vol_btc * btc,
+            "marketCap": market_cap,
+            "exchange": venue(&tag),
+            "mineable": is_mineable(&tag),
+        }));
+    }
+    // CLORE steht nicht auf WhatToMine -> Info-Zeile
+    rows.push(serde_json::json!({
+        "key": "CLORE|Clore.ai", "tag": "CLORE", "name": "Clore.ai", "algo": "KawPow",
+        "perday": null, "usd": null, "vol": null, "marketCap": "-",
+        "exchange": venue("CLORE"), "mineable": true, "infoOnly": true,
+    }));
+    rows.sort_by(|a, b| {
+        let ua = a.get("usd").and_then(|x| x.as_f64()).unwrap_or(-1.0);
+        let ub = b.get("usd").and_then(|x| x.as_f64()).unwrap_or(-1.0);
+        ub.partial_cmp(&ua).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(serde_json::json!({ "rows": rows, "btc": btc, "btc_src": btc_src }))
+}
+
 pub fn run() {
     let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
     tauri::Builder::default()
@@ -959,6 +1103,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             cfg_load,
             cfg_save,
+            app_version,
             miners_status,
             miner_download,
             miner_download_all,
@@ -969,6 +1114,7 @@ pub fn run() {
             gpu_stats,
             pool_stats,
             pool_ping,
+            estimates_fetch,
             bench_start,
         ])
         .run(tauri::generate_context!())

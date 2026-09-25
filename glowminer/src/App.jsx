@@ -4,8 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import {
-  COINS, DEFAULT_HASHRATE, fetchBtcUsd, fetchWtmCoins,
-  estimateAll, fmt,
+  COINS, DEFAULT_HASHRATE, fmt,
 } from './lib.js';
 
 const inTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -47,6 +46,8 @@ export default function App() {
   const [wcAccounts, setWcAccounts] = useState([]);
   const [wcBusy, setWcBusy] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
+  const [backendVersion, setBackendVersion] = useState('');
+  const [diagBusy, setDiagBusy] = useState(false);
   const [stats, setStats] = useState(null);
   const [gpu, setGpu] = useState(null);
   const [poolInfo, setPoolInfo] = useState(null);
@@ -55,6 +56,7 @@ export default function App() {
   const [pingResults, setPingResults] = useState([]);
   const wtmCache = useRef(null);
   const btcCache = useRef(84000);
+  const estScale = useRef(1);
   const wcProvider = useRef(null);
   const logRef = useRef(null);
 
@@ -70,6 +72,7 @@ export default function App() {
             hashrates: { ...DEFAULT_HASHRATE, ...(c.hashrates || {}) } }));
         } catch { /* defaults */ }
         try { setMiners(await invoke('miners_status')); } catch { /* noop */ }
+        try { setBackendVersion(await invoke('app_version')); } catch { /* noop */ }
         await listen('mine-log', (e) => pushLog(e.payload));
         await listen('mine-status', (e) => setRunning(!!e.payload.running));
         await listen('bench-update', (m) => {
@@ -136,28 +139,62 @@ export default function App() {
   }
 
   async function loadCoins() {
+    if (!inTauri) return pushLog('Available only in the app build.');
     setCoinsLoading(true);
     try {
-      const [wtm, btc] = await Promise.all([fetchWtmCoins(), fetchBtcUsd()]);
-      wtmCache.current = wtm;
-      btcCache.current = btc;
-      applyEstimates(wtm, btc);
-      pushLog(`[estimates] ${Object.keys(wtm).length} coins, BTC $${Math.round(btc).toLocaleString('de-DE')}.`);
+      const res = await invoke('estimates_fetch', { req: {
+        powerPct: Number(cfg.powerPct) || 100, hashrates: cfg.hashrates,
+      }});
+      estScale.current = (Number(cfg.powerPct) || 100) / 100;
+      setRows(res.rows || []);
+      setCoinsMeta(`WhatToMine live - BTC $${Math.round(res.btc).toLocaleString('de-DE')} (${res.btc_src}) - Leistung ${cfg.powerPct}% - ${(res.rows || []).length} Coins`);
+      pushLog(`[estimates] ${(res.rows || []).length} Coins (BTC via ${res.btc_src}).`);
     } catch (e) {
-      setCoinsMeta('WhatToMine unreachable: ' + e.message);
+      setCoinsMeta('Fehler: ' + e);
+      pushLog('[estimates] Fehler: ' + e);
     }
     setCoinsLoading(false);
   }
-  function applyEstimates(wtm, btc) {
-    const scale = (Number(cfg.powerPct) || 100) / 100;
-    const rowsAll = estimateAll(wtm, cfg.hashrates, scale, btc);
-    setRows(rowsAll);
-    setCoinsMeta(`WhatToMine live - BTC $${Math.round(btc).toLocaleString('de-DE')} - power ${cfg.powerPct}% applied - ${rowsAll.length} coins`);
+  // Leistungs-Regler skaliert geladene Werte ohne Neuabruf
+  function rescaleRows(pct) {
+    const old = estScale.current || 1;
+    const next = (Number(pct) || 100) / 100;
+    if (!old || old === next) { estScale.current = next; return; }
+    const f = next / old;
+    setRows((rs) => rs.map((r) => ({
+      ...r,
+      perday: r.perday == null ? null : r.perday * f,
+      usd: r.usd == null ? null : r.usd * f,
+    })));
+    estScale.current = next;
   }
-  useEffect(() => {
-    if (wtmCache.current) applyEstimates(wtmCache.current, btcCache.current);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cfg.powerPct, cfg.hashrates]);
+
+  async function runDiagnostics() {
+    if (!inTauri) return pushLog('Available only in the app build.');
+    setDiagBusy(true);
+    pushLog('[diagnose] Backend v' + (backendVersion || '?'));
+    try {
+      const res = await invoke('estimates_fetch', { req: {
+        powerPct: Number(cfg.powerPct) || 100, hashrates: cfg.hashrates,
+      }});
+      pushLog(`[diagnose] Coin-Abruf OK (${(res.rows || []).length} Coins, BTC via ${res.btc_src}).`);
+    } catch (e) { pushLog('[diagnose] Coin-Abruf FEHLER: ' + e); }
+    const wt = (COINS.find((c) => c.id === cfg.coin) || {}).woolyTag;
+    if (wt) {
+      try {
+        const info = await invoke('pool_stats', { tag: wt });
+        pushLog('[diagnose] Pool-Stats OK (Fee ' + (info.stats?.fee ?? '?') + '%).');
+      } catch (e) { pushLog('[diagnose] Pool-Stats FEHLER: ' + e); }
+    } else {
+      pushLog('[diagnose] Pool-Stats: dieser Coin läuft nicht über WoolyPooly.');
+    }
+    try {
+      const res = await invoke('pool_ping', { hosts: [pool] });
+      const ms = res[0]?.ms;
+      pushLog('[diagnose] Pool-Ping ' + pool + ': ' + (ms == null ? 'TIMEOUT' : ms + ' ms'));
+    } catch (e) { pushLog('[diagnose] Pool-Ping FEHLER: ' + e); }
+    setDiagBusy(false);
+  }
 
   // Live-Polling während Mining läuft (Status, Hashrate, GPU)
   useEffect(() => {
@@ -195,6 +232,10 @@ export default function App() {
     loadPoolInfo(cfg.coin);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cfg.coin]);
+  useEffect(() => {
+    rescaleRows(cfg.powerPct);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cfg.powerPct]);
 
   function setMode(m) {
     const c = COINS.find((x) => x.id === cfg.coin);
@@ -230,8 +271,7 @@ export default function App() {
     setPinging(false);
   }
 
-  const filtered = rows.filter((r) => {
-    const q = search.trim().toLowerCase();
+  const filtered = rows.filter((r) => {    const q = search.trim().toLowerCase();
     if (!q) return true;
     return (r.tag + ' ' + r.name + ' ' + r.algo).toLowerCase().includes(q);
   });
@@ -373,7 +413,7 @@ export default function App() {
                       || (st.modes || [])[0] || {};
                     const ph = m.algo_stats?.default?.hashrate;
                     return `Effort ${mode}: ${Math.round((m.effort || 0) * 100)}% - Pool-HR ${ph ? fmtHs(ph) : '-'} - Miner ${m.algo_stats?.default?.minersTotal ?? '-'}`;
-                  })() : 'Live-Daten nur für WoolyPooly-Coins'}
+                  })() : (poolInfo?.error ? `Fehler: ${poolInfo.error}` : 'Live-Daten nur für WoolyPooly-Coins')}
               </div>
             </div>
           </div>
@@ -507,6 +547,16 @@ export default function App() {
               <button className="btn" onClick={() => openExt(coin.exchangeUrl)}>Exchange page</button>
               <button className="btn" onClick={() => openExt('https://woolypooly.com/')}>Pool dashboard</button>
             </div>
+          </div>
+
+          <div className="card">
+            <h3>DIAGNOSE{backendVersion ? ` (Backend v${backendVersion})` : ''}</h3>
+            <div className="row">
+              <button className="btn" disabled={diagBusy || !inTauri} onClick={runDiagnostics}>
+                {diagBusy ? 'Prüfe' : 'Verbindung testen'}
+              </button>
+            </div>
+            <div className="hint">Prüft Coin-Abruf, Pool-Stats und Pool-Ping - Ergebnis steht im Log. Falls hier Version 3.1.x steht: bitte auf 3.2.1+ updaten.</div>
           </div>
 
           <div className="row">
