@@ -119,6 +119,29 @@ fn miner_exe(app: &AppHandle, key: &str) -> Option<PathBuf> {
     })
 }
 
+/// Findet die Miner-EXE robust: erst kanonischer Pfad, sonst rekursiv im
+/// Miner-Ordner suchen (Releases entpacken oft in Versions-Unterordner wie
+/// z.B. `bzminer_v100.36_windows\`).
+fn resolve_miner_exe(app: &AppHandle, key: &str) -> Option<PathBuf> {
+    if let Some(p) = miner_exe(app, key) {
+        if p.exists() {
+            return Some(p);
+        }
+        let want = p.file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if !want.is_empty() {
+            let base = app_dir(app).join(key);
+            if let Some(found) = find_file_recursive(&base, &|name: &str| {
+                name.to_lowercase() == want
+            }) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
 fn emit_log(app: &AppHandle, line: &str) {
     let _ = app.emit("mine-log", line.to_string());
 }
@@ -198,14 +221,20 @@ fn miners_status(app: AppHandle) -> Vec<MinerStatus> {
     miners()
         .into_iter()
         .map(|(key, m)| {
-            let exe = miner_exe(&app, key).unwrap_or_default();
+            let (installed, exe) = match resolve_miner_exe(&app, key) {
+                Some(p) => (true, p.to_string_lossy().to_string()),
+                None => (
+                    false,
+                    miner_exe(&app, key).unwrap_or_default().to_string_lossy().to_string(),
+                ),
+            };
             MinerStatus {
                 key: key.to_string(),
                 label: m.label.to_string(),
                 supports: m.supports.iter().map(|s| s.to_string()).collect(),
                 note: m.note.to_string(),
-                installed: exe.exists(),
-                exe: exe.to_string_lossy().to_string(),
+                installed,
+                exe,
             }
         })
         .collect()
@@ -214,7 +243,8 @@ fn miners_status(app: AppHandle) -> Vec<MinerStatus> {
 fn build_cmd(app: &AppHandle, key: &str, algo: &str, wallet: &str, pool: &str, worker: &str, power_pct: i64)
     -> Result<(PathBuf, Vec<String>), String>
 {
-    let exe = miner_exe(app, key).ok_or_else(|| format!("Unbekannter Miner: {key}"))?;
+    let exe = resolve_miner_exe(app, key)
+        .ok_or_else(|| "Miner-EXE fehlt — bitte über 'Alle Miner laden' herunterladen".to_string())?;
     let malgo = miner_algo(key, algo)
         .ok_or_else(|| format!("Miner unterstützt {algo} nicht"))?;
     let pool = if pool.trim().is_empty() { default_pool(algo) } else { pool.trim() };
@@ -355,13 +385,11 @@ fn mine_start(app: AppHandle, state: State<Arc<Mutex<AppState>>>, opts: MineStar
     if opts.wallet.trim().is_empty() {
         return Err("Wallet fehlt".into());
     }
-    // Miner vorhanden? sonst laden
-    let exe_probe = miner_exe(&app, &opts.miner_key).ok_or("Unbekannter Miner")?;
-    if !exe_probe.exists() {
+    // Miner vorhanden? sonst laden (auflösen inkl. Versions-Unterordner)
+    if resolve_miner_exe(&app, &opts.miner_key).is_none() {
         download_miner_blocking(&app, &opts.miner_key)?;
-        let exe2 = miner_exe(&app, &opts.miner_key).ok_or("Download fehlgeschlagen")?;
-        if !exe2.exists() {
-            return Err("Miner-EXE fehlt nach Download".into());
+        if resolve_miner_exe(&app, &opts.miner_key).is_none() {
+            return Err("Miner-EXE fehlt nach Download (ggf. Antivirus-Quarantäne — Defender-Exception setzen)".into());
         }
     }
     let pool = opts.pool.clone().unwrap_or_default();
@@ -574,8 +602,7 @@ fn miner_download(app: AppHandle, key: String) -> Result<bool, String> {
 #[tauri::command]
 fn miner_download_all(app: AppHandle, algo: String) -> Result<bool, String> {
     for (key, _) in miners().into_iter().filter(|(_, m)| m.supports.contains(&algo.as_str())) {
-        let exe = miner_exe(&app, key).unwrap_or_default();
-        if exe.exists() {
+        if resolve_miner_exe(&app, key).is_some() {
             emit_log(&app, &format!("» [{key}] bereits vorhanden."));
         } else if let Err(e) = download_miner_blocking(&app, key) {
             emit_log(&app, &format!("» [{key}] fehler: {e}"));
@@ -644,14 +671,18 @@ fn bench_start(app: AppHandle, state: State<Arc<Mutex<AppState>>>, opts: BenchOp
     let mut results = Vec::new();
     for key in &keys {
         // ggf. laden
-        let exe = miner_exe(&app, key).unwrap_or_default();
-        if !exe.exists() {
+        if resolve_miner_exe(&app, key).is_none() {
             let _ = app.emit("bench-update", serde_json::json!({
                 "type": "progress", "key": key, "text": "lade …"
             }));
             if let Err(e) = download_miner_blocking(&app, key) {
                 let label = key.clone();
                 results.push(BenchResult { key: key.clone(), label, score: 0.0, text: format!("download: {e}") });
+                continue;
+            }
+            if resolve_miner_exe(&app, key).is_none() {
+                let label = key.clone();
+                results.push(BenchResult { key: key.clone(), label, score: 0.0, text: "exe fehlt (ggf. Antivirus)".into() });
                 continue;
             }
         }
