@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 // ---------------- Miner-Registry ----------------
 struct MinerMeta {
@@ -87,9 +87,9 @@ impl Default for AppState {
 }
 
 fn app_dir(app: &AppHandle) -> PathBuf {
-    // Stabiler, persistenter Ordner — NICHT neben der EXE:
-    // Die portable EXE entpackt sich bei jedem Start in ein neues Temp-Verzeichnis,
-    // Miner wuerden sonst bei jedem Start neu geladen und vom AV kassiert.
+    // Voll portable: ALLES liegt neben der EXE (z.B. F:\mining).
+    // Kein AppData, kein Temp — Config + Miner bleiben im Mining-Ordner.
+    let _ = app;
     if let Ok(exe) = std::env::current_exe() {
         let s = exe.to_string_lossy().replace('\\', "/");
         if s.contains("/target/debug/") || s.contains("/target/release/") {
@@ -98,17 +98,11 @@ fn app_dir(app: &AppHandle) -> PathBuf {
                 return root.to_path_buf();
             }
         }
-    }
-    match app.path().app_data_dir() {
-        Ok(d) => {
-            let _ = std::fs::create_dir_all(&d);
-            d
+        if let Some(p) = exe.parent() {
+            return p.to_path_buf();
         }
-        Err(_) => std::env::current_exe()
-            .ok()
-            .and_then(|e| e.parent().map(|p| p.to_path_buf()))
-            .unwrap_or_else(|| PathBuf::from(".")),
     }
+    PathBuf::from(".")
 }
 
 fn config_path(app: &AppHandle) -> PathBuf {
