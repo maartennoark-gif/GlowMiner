@@ -1,18 +1,8 @@
-# Binaries / Build / Secrets — nicht ins Repo
-XTX-Miner.exe
-GlowMiner-*-portable.exe
-GlowMiner-portable.exe
+# Build / Secrets — nicht ins Repo
 dist/
 build/
 release/
 target/
 node_modules/
-__pycache__/
-*.spec
 config.json
 *.zip
-bzminer/
-teamredminer/
-srbminer/
-wildrig/
-onezerominer/
