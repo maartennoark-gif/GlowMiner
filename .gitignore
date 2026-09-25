@@ -1,4 +1,5 @@
 # Build / Secrets — nicht ins Repo
+*.exe
 dist/
 build/
 release/
